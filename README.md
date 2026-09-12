@@ -8,15 +8,17 @@
 
 [下载安装包](https://github.com/whdite/bdOffice/releases/latest) · [国内下载入口](https://bdoffice.deepthink-x.com/updates) · [更新日志](CHANGELOG.md) · [下载与校验说明](DOWNLOADS.md)
 
-## 当前版本：0.8.5
+## 当前版本：0.8.6
 
-| 平台        | 下载                                                                                                                                                                                                                                                                                                                      |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows x64 | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.8.5/BigDogOffice-0.8.5-windows-x64.exe)                                                                                                                                                                                                              |
-| Linux x64   | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.8.5/BigDogOffice-0.8.5-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.8.5/BigDogOffice-0.8.5-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.8.5/BigDogOffice-0.8.5-linux-x64.rpm) |
-| macOS       | 本版本安装包正在准备，验证完成后发布，不以旧版本替代。                                                                                                                                                                                                                                                                    |
+| 平台                | 下载                                                                                                                                                                                                                                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows x64         | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-windows-x64.exe)                                                                                                                                                                                                              |
+| Linux x64           | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-linux-x64.rpm) |
+| macOS Apple Silicon | [DMG](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-macos-arm64.dmg) · [ZIP](https://github.com/whdite/bdOffice/releases/download/v0.8.6/BigDogOffice-0.8.6-macos-arm64.zip)                                                                                                             |
 
-Windows 安装器目前没有 Authenticode 发布者证书，可能显示“未知发布者”。Minisign 签名用于检查文件来源及完整性，不能替代系统的发布者认证。
+Windows 安装器目前没有 Authenticode 发布者证书，可能显示“未知发布者”。macOS 包为 Apple Silicon（ARM64），采用 ad-hoc 签名，未使用 Apple Developer ID 或公证；Intel 包尚未提供。Minisign 用于检查文件来源及完整性，不能替代系统发布者认证。
+
+0.8.6 起，「关于」和顶部新版本提示统一使用本仓库的 Releases。更新需由你主动下载并安装，不静默安装或重启。0.8.5 及更早版本须先手动安装此版本，完成更新通道迁移。
 
 ## 在一个工作空间里，从想法到文件
 
