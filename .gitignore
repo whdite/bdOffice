@@ -1,0 +1,10 @@
+# This repository is an allowlisted public documentation and download surface.
+*
+!.gitignore
+!.gitattributes
+!README.md
+!CHANGELOG.md
+!DOWNLOADS.md
+!ACKNOWLEDGEMENTS.md
+!assets/
+!assets/bigdog-office.png
