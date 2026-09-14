@@ -8,15 +8,15 @@
 
 [下载安装包](https://github.com/whdite/bdOffice/releases/latest) · [国内下载入口](https://bdoffice.deepthink-x.com/updates) · [更新日志](CHANGELOG.md) · [下载与校验说明](DOWNLOADS.md)
 
-## 当前版本：0.8.7
+## 当前版本：0.9.0
 
-2026-09-14 功能更新：完整的独立 Agent 工作区，保留工作区、会话、文件与工具能力；审批移到发送区，运行状态更紧凑。修复准备阶段的停止、插话、并发发送与超时，新增 Zotero 引用集成（需本机 Zotero）和 Requesty 模型接入，并适配一批官方文档、表格及打印修复。**本次为正常版本升级**，0.8.6 用户可通过新版本提示进入下载，再手动安装。
+2026-09-14 更新：内置办公命令行，支持批量办公操作与无界面导出；可为已有 Claude Code、Codex、Cursor 等助手安装办公操作 Skill。Word 长文与 HTML 生成支持流式展示，保留审批、撤销和未保存内容保护。**本次为正常版本升级**，0.8.6／0.8.7 用户可通过新版本提示进入下载，再手动安装。
 
 | 平台                | 下载                                                                                                                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows x64         | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-windows-x64.exe)                                                                                                                                                                                                              |
-| Linux x64           | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-linux-x64.rpm) |
-| macOS Apple Silicon | [DMG](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-macos-arm64.dmg) · [ZIP](https://github.com/whdite/bdOffice/releases/download/v0.8.7/BigDogOffice-0.8.7-macos-arm64.zip)                                                                                                             |
+| Windows x64         | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-windows-x64.exe)                                                                                                                                                                                                              |
+| Linux x64           | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.rpm) |
+| macOS Apple Silicon | [DMG](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-macos-arm64.dmg) · [ZIP](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-macos-arm64.zip)                                                                                                             |
 
 Windows 安装器目前没有 Authenticode 发布者证书，可能显示“未知发布者”。macOS 包为 Apple Silicon（ARM64），采用 ad-hoc 签名，未使用 Apple Developer ID 或公证；Intel 包尚未提供。Minisign 用于检查文件来源及完整性，不能替代系统发布者认证。
 
@@ -29,6 +29,8 @@ Windows 安装器目前没有 Authenticode 发布者证书，可能显示“未�
 - **看得见的执行过程**：大狗 Agent 支持工具调用与执行记录，可选择自动执行或逐次审批。
 - **按需选择模型**：通过模型设置连接支持的厂商，配置文本与图像生成模型。联网 AI 服务按所选服务商的规则使用。
 - **新增 HTML 编辑器**：源代码编辑、沙箱预览、保存，以及 PDF／DOCX 导出。
+- **本地办公命令行**：应用自带 `bigdogoffice`，不依赖全局 Node；在「设置 → 集成」中启用命令行入口或安装操作 Skill。安装的是操作指引，不是其他 Agent 本体。
+- **更连贯的生成**：长文按流式生成，提前停止可选择采用或丢弃草稿；未采用的草稿不会触发自动保存。
 
 本次发布不包含尚在开发的企业版组织管理、云存储和协同审批功能。HTML 编辑器已支持内嵌 AI 审批；全局 Agent 对 HTML 的支持不等同于完整语义编辑。
 
