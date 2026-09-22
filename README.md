@@ -8,15 +8,15 @@
 
 [下载安装包](https://github.com/whdite/bdOffice/releases/latest) · [国内下载入口](https://bdoffice.deepthink-x.com/updates) · [更新日志](CHANGELOG.md) · [下载与校验说明](DOWNLOADS.md)
 
-## 当前版本：0.9.0
+## 当前版本：0.9.2
 
-2026-09-14 更新：内置办公命令行，支持批量办公操作与无界面导出；可为已有 Claude Code、Codex、Cursor 等助手安装办公操作 Skill。Word 长文与 HTML 生成支持流式展示，保留审批、撤销和未保存内容保护。**本次为正常版本升级**，0.8.6／0.8.7 用户可通过新版本提示进入下载，再手动安装。
+2026-09-23 更新：合入经审查的上游功能与修复，改进 Word 长文加载、编辑与分页，新增 Word／表格独立编辑器窗口，保留大狗 Agent、草稿、保存和退出保护。0.9.0 用户可通过新版本提示下载后手动安装。**本次轮换 Minisign 发布公钥**，下载节点需按[公钥轮换公告](SIGNING-KEYS.md)更新信任配置。
 
 | 平台                | 下载                                                                                                                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows x64         | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-windows-x64.exe)                                                                                                                                                                                                              |
-| Linux x64           | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-linux-x64.rpm) |
-| macOS Apple Silicon | [DMG](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-macos-arm64.dmg) · [ZIP](https://github.com/whdite/bdOffice/releases/download/v0.9.0/BigDogOffice-0.9.0-macos-arm64.zip)                                                                                                             |
+| Windows x64         | [EXE 安装器](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-windows-x64.exe)                                                                                                                                                                                                              |
+| Linux x64           | [AppImage](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-linux-x64.AppImage) · [DEB](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-linux-x64.deb) · [RPM](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-linux-x64.rpm) |
+| macOS Apple Silicon | [DMG](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-macos-arm64.dmg) · [ZIP](https://github.com/whdite/bdOffice/releases/download/v0.9.2/BigDogOffice-0.9.2-macos-arm64.zip)                                                                                                             |
 
 Windows 安装器目前没有 Authenticode 发布者证书，可能显示“未知发布者”。macOS 包为 Apple Silicon（ARM64），采用 ad-hoc 签名，未使用 Apple Developer ID 或公证；Intel 包尚未提供。Minisign 用于检查文件来源及完整性，不能替代系统发布者认证。
 
