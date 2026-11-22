@@ -369,6 +369,8 @@ export class AssistantTaskService {
           }
         }
         const current = this.store.get(id)
+        if (current.state === 'failed' && current.reason === 'task_effect_requires_review')
+          throw new Error(current.reason)
         if (
           TASK_TERMINAL_STATES.has(current.state) ||
           current.state === 'paused' ||

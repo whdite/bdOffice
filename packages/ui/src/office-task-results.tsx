@@ -52,8 +52,8 @@ export function officeTaskCopy(lang: string) {
       'The previous action has an uncertain result. Review the current app or file state and make sure the old execution has stopped.',
     ],
     task_effect_requires_review: [
-      '上一次操作需要先核对。',
-      'Review the previous action before continuing.',
+      '请在「任务和成果」中核对已中断的任务，再继续。',
+      'Review the interrupted task in Tasks and results before continuing.',
     ],
     task_context_changed: [
       '文件已有其他修改，请核对后继续。',

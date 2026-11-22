@@ -192,6 +192,58 @@ export class AssistantTaskStore {
       .get(id)
   }
 
+  private releaseStoppedEditorResource(bootId: string): void {
+    const stopped = this.db
+      .prepare(
+        `SELECT r.owner_task_id FROM execution_resources r
+         JOIN task_attempts a ON a.id=r.owner_attempt_id
+         JOIN tasks t ON t.id=r.owner_task_id
+         WHERE r.resource_key=? AND r.state='quarantined' AND a.state='lost' AND a.boot_id<>?
+         AND t.kind='assistant' AND json_extract(t.goal_json,'$.entry')='file'
+         AND NOT EXISTS (SELECT 1 FROM task_leases l WHERE l.task_id=t.id)`,
+      )
+      .get(RESOURCE, bootId)
+    if (!stopped) return
+    const steps = this.db
+      .prepare(
+        "SELECT recovery,targets_json FROM task_steps WHERE task_id=? AND state='awaiting_reconciliation'",
+      )
+      .all(String(stopped.owner_task_id))
+    // The previous editor has stopped. Keep its review attached to the recorded
+    // documents and session so it no longer occupies the shared execution slot.
+    const documentOnly =
+      steps.length > 0 &&
+      steps.every((step) => {
+        if (step.recovery !== 'verify_effect') return false
+        const targets = parse<TaskTargetVersion[]>(step.targets_json)
+        return targets.length > 0 && targets.every((target) => target.exists && target.path)
+      })
+    if (documentOnly)
+      this.db.prepare('DELETE FROM execution_resources WHERE resource_key=?').run(RESOURCE)
+  }
+
+  private hasTargetsAwaitingReview(targets: TaskTargetVersion[]): boolean {
+    const steps = this.db
+      .prepare(
+        `SELECT s.targets_json FROM tasks t JOIN task_steps s ON s.task_id=t.id
+         WHERE t.kind='assistant' AND t.state='interrupted' AND t.reason_code='outcome_unknown'
+         AND s.state='awaiting_reconciliation' AND s.recovery='verify_effect'`,
+      )
+      .all()
+    const pathKey = (path: string) => (process.platform === 'win32' ? path.toLowerCase() : path)
+    return steps.some((step) => {
+      if (targets.length === 0) return true
+      return parse<TaskTargetVersion[]>(step.targets_json).some((previous) =>
+        targets.some(
+          (target) =>
+            pathKey(target.path) === pathKey(previous.path) ||
+            (!!previous.fileIdentity && target.fileIdentity === previous.fileIdentity) ||
+            (!!previous.editorIdentity && target.editorIdentity === previous.editorIdentity),
+        ),
+      )
+    })
+  }
+
   startBoot(bootId: string): void {
     this.tx(() => {
       const stamp = this.now()
@@ -251,6 +303,7 @@ export class AssistantTaskStore {
         )
         if (uncertain || waited) this.notice(id, sequence, 'task_blocked')
       }
+      this.releaseStoppedEditorResource(bootId)
       this.db
         .prepare(
           "UPDATE task_outbox SET state='pending',delivery_lease_until=NULL WHERE route='local' AND state='inflight'",
@@ -383,10 +436,20 @@ export class AssistantTaskStore {
       const owner = this.db
         .prepare('SELECT task_id FROM session_owners WHERE session_id=?')
         .get(String(row.session_id))
-      if (
-        (owner && owner.task_id !== id) ||
-        this.db.prepare('SELECT 1 FROM execution_resources WHERE resource_key=?').get(RESOURCE)
-      ) {
+      const otherOwner = owner && owner.task_id !== id ? String(owner.task_id) : undefined
+      const resource = this.db
+        .prepare('SELECT state FROM execution_resources WHERE resource_key=?')
+        .get(RESOURCE)
+      if ((otherOwner && this.uncertain(otherOwner)) || resource?.state === 'quarantined') {
+        this.notice(
+          id,
+          this.transition(id, 'failed', 'task_effect_requires_review'),
+          'task_blocked',
+        )
+        this.release(id)
+        return null
+      }
+      if (otherOwner || resource) {
         if (row.state !== 'waiting_resource')
           this.transition(id, 'waiting_resource', 'resource_busy')
         return null
@@ -718,7 +781,11 @@ export class AssistantTaskStore {
         budget.usedActiveMs >= budget.maxActiveMs
       )
         throw new Error('task_stopping')
-      if (this.uncertain(lease.taskId)) throw new Error('task_effect_requires_review')
+      if (
+        this.uncertain(lease.taskId) ||
+        (input.recovery !== 'repeat_read' && this.hasTargetsAwaitingReview(input.targets))
+      )
+        throw new Error('task_effect_requires_review')
       if (lease.epoch > 1 && input.recovery !== 'repeat_read') {
         const reviewed = this.db
           .prepare(
