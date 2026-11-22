@@ -153,6 +153,12 @@ export const it = {
   aiSumWriteDocumentFailed: 'Scrittura non riuscita',
   aiSumWriteDocumentPartial: 'Contenuto scritto in parte',
   aiWritingDocument: 'Scrittura del documento · {blocks} blocchi',
+  aiDraftWriting: 'Scrittura nel documento',
+  aiDraftReady: 'Bozza pronta',
+  aiDraftSelectText: 'Seleziona del testo in un paragrafo o paragrafi interi.',
+  aiDraftSelectionChanged: 'La selezione è cambiata. Seleziona di nuovo il testo.',
+  aiDraftReplace: 'Sostituisci il testo originale',
+  aiDraftInsert: 'Inserisci sotto',
   aiPartialTitle: 'È stata scritta solo una parte del contenuto',
   aiPartialBody:
     'Sono arrivati {blocks} blocchi prima che la scrittura si interrompesse. Conservare questa parte o scartarla?',

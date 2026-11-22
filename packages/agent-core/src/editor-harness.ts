@@ -21,10 +21,16 @@ export const EDITOR_ROUTES: Record<EditorHarnessKind, EditorRoute> = {
   },
   docs: {
     read: ['get_document_context', 'read_blocks'],
-    write: ['apply_ops', 'replace_blocks', 'insert_content', 'write_document'],
+    write: [
+      'apply_ops',
+      'replace_selection',
+      'replace_blocks',
+      'insert_content',
+      'write_document',
+    ],
     verify: ['read_blocks', 'get_document_context', 'read_comments', 'read_revisions'],
     guide:
-      "DOCX: read_blocks returns restricted HTML, with 0-based block indexes. For title text use apply_ops with findReplace; heading level uses setHeadingLevel; title font/color uses setFont (color), NOT setParagraphFormat.shadingFill (background). Font sizes are points. For long drafting use write_document with a concrete plan and references. Short exact replacements use replace_blocks; short additions use insert_content. Never rewrite the whole document for a targeted edit. Preserve unrelated formatting and narrow targets. Read comments before replying/resolving; document context includes headers/footers. Never accept/reject revisions on the user's behalf.",
+      "DOCX: read_blocks returns restricted HTML, with 0-based block indexes. For title text use apply_ops with findReplace; heading level uses setHeadingLevel; title font/color uses setFont (color), NOT setParagraphFormat.shadingFill (background). Font sizes are points. Use write_document with rewriteSelection:true to preview expansion, shortening, polishing, or rewriting of selected prose. Use replace_selection for literal corrections within one paragraph, replace_blocks for whole blocks, and insert_content for short additions. Preserve text outside the selection and unrelated formatting. Read comments before replying/resolving; document context includes headers/footers. Never accept/reject revisions on the user's behalf.",
   },
   sheets: {
     read: ['get_workbook_context', 'read_range', 'load_guide'],

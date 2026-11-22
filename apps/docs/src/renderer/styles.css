@@ -12642,6 +12642,7 @@ body.docs-crop-active
 
 /* editor column: document scroller on top, optional split pane below */
 .editor-area {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -15094,10 +15095,62 @@ tr > .page-gap-cut {
   font-family: 'Noto Serif CJK SC';
 }
 
-.ai-partial-card .ai-queue-hint {
-  padding: 0 10px 4px;
+.doc-ai-draft-block {
+  box-shadow: -3px 0 0 var(--accent-soft);
+}
+
+.doc-ai-draft-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-inline-start: 1px;
+  vertical-align: -0.12em;
+  background: var(--accent);
+  animation: doc-ai-draft-blink 900ms steps(1) infinite alternate;
+}
+
+@keyframes doc-ai-draft-blink {
+  60%, 100% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .doc-ai-draft-caret { animation: none; }
+}
+
+.doc-ai-draft-layer {
+  position: absolute;
+  inset: auto 16px 16px;
+  z-index: 12;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.doc-ai-draft-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--docs-shadow-menu);
+  pointer-events: auto;
+}
+
+.doc-ai-draft-message {
+  margin-inline-end: 5px;
   font-size: 12px;
-  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.doc-ai-draft-bar kbd {
+  margin-inline-start: 3px;
+  font-size: 10px;
 }
 
 /* ---- post-paste "Paste options" chip (Word parity) ---- */

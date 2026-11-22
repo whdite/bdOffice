@@ -2,6 +2,7 @@ import { assertFullContent } from '../phased-content'
 import { assertNoDocumentDraft } from './draft-state'
 import { placeholderInstruction } from './redact'
 import { redactLabelsOf } from './redact-view'
+import { t } from '../i18n/locale'
 import type { Editor } from '@tiptap/core'
 import type { AgentSkill } from '@genoffice/agent-core'
 import {
@@ -17,6 +18,7 @@ import {
   AGENT_TOOLS,
   executeTool,
   markDocSeen,
+  toolAllowedInSelection,
   type AiCommentsAccess,
   type AiHeaderFooterAccess,
   type FrozenSelection,
@@ -51,6 +53,8 @@ export function createDocsSkill(
   getNotes?: () => AiNotesAccess | undefined,
   /** same as imageGenAvailable, for analyze_media (seeing pictures that are in the document) */
   mediaAnalysisAvailable?: () => boolean,
+  /** The selection at send time, or null for a request without a selection. */
+  getRequestedSelection?: () => FrozenSelection | null,
 ): AgentSkill {
   // Selection frozen per run: tools act on the range the prompt described,
   // not on wherever the user's live selection has wandered mid-run. The doc
@@ -83,14 +87,35 @@ export function createDocsSkill(
     },
     get tools() {
       const hidden = mediaToolsOff()
-      return hidden.size === 0 ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => !hidden.has(t.name))
+      return AGENT_TOOLS.filter(
+        ({ name }) =>
+          !hidden.has(name) &&
+          (!frozen?.scope.isRange || toolAllowedInSelection(name, frozen.previewRewrite)),
+      )
     },
     buildContext: () => {
       const editor = getEditor()
       assertFullContent()
       assertNoDocumentDraft(editor)
+      const requested = getRequestedSelection?.()
+      const doc = editor.state.doc
+      if (requested && requested.doc !== doc) {
+        // A tail that finished loading, or an edit after the range, leaves the positions valid.
+        for (let i = 0; i <= requested.scope.endIndex; i++) {
+          if (!doc.maybeChild(i)?.eq(requested.doc.child(i)))
+            throw new Error(t('aiDraftSelectionChanged'))
+        }
+      }
+      const scope = requested?.scope ?? getSelectionScope(editor)
       markDocSeen(editor) // the context the model receives is the freshness baseline for index-addressed writes
-      frozen = { scope: getSelectionScope(editor), doc: editor.state.doc }
+      frozen = {
+        ...requested,
+        doc,
+        scope:
+          requested === null
+            ? { ...scope, startIndex: scope.endIndex, from: scope.to, isRange: false }
+            : scope,
+      }
       return buildDocContext(
         editor,
         frozen.scope,

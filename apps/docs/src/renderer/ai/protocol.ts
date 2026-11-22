@@ -1,6 +1,6 @@
 import type { Editor } from '@tiptap/core'
 import { REDACT_MARK } from './redact'
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { TextSelection } from '@tiptap/pm/state'
 import {
   TABLE_HEADER_FILL,
@@ -96,7 +96,7 @@ export const OPS_GUIDE = [
   'BC-1 Giving fields the user did not ask for, wiping existing formatting by mistake;',
   'BC-2 A "whole document" formatting operation only changed docParagraph and missed docHeading/docListItem;',
   'BC-3 Addressing by word/character position (no such addressing exists); use block indexes, text containment or the selection instead;',
-  'BC-4 Using findReplace sentence by sentence for rewrites such as translation/abbreviation; use replace_blocks (or replace_selection for a selected span) instead;',
+  'BC-4 Using findReplace sentence by sentence for prose rewrites; use write_document with rewriteSelection:true for selected text;',
 ].join('\n')
 
 export const HTML_RULES = [
@@ -129,12 +129,12 @@ export const AGENT_SYSTEM_PROMPT = [
   '# Tool usage',
   '- Every user message carries the latest "document block list" (index|type|content preview; previews may be truncated); after modifications, call get_document_context if you need the latest state;',
   '- When a list preview is truncated, read the full content with read_blocks before rewriting; never rewrite based on a truncated preview;',
-  '- Content changes: use insert_content for new content, and replace_blocks to rewrite/replace existing blocks (pass a block index range and the new HTML); replaced blocks pass their paragraph and text formatting (font, size, color, indent, spacing, alignment) on to the new blocks automatically, and a rewritten table keeps its widths, borders, shading and cell formatting, so a rewrite never needs follow-up formatting commands;',
-  '- Long new content (drafting a whole document, a chapter, a full report/article/translation — anything beyond a few paragraphs) goes through write_document: you pass the plan and the reference material, and the system writer streams the text into the document while the user watches; never paste long content into insert_content. When the document is blank and the user asks for content, use write_document;',
+  '- Use insert_content for short insertions and replace_blocks when rewriting a specific block range or table. Replaced blocks inherit the original formatting and tables retain their layout and cell styles;',
+  '- Use write_document to draft in a blank document, write long new content, or preview a user-requested full prose rewrite (replaceDocument:true). Give the writer a plan and reference material. For a full rewrite, read the original first and pass the details the writer needs in context. The editor streams the draft on the page and asks for approval before replacing a nonblank document;',
   '- Formatting, structure, and batch operations (color/font size/line spacing/alignment/indent/heading level/find & replace/delete/move/list conversion) go through apply_ops — do not rewrite whole blocks with replace_blocks;',
   '- Small in-place text fixes (changing a few words inside a sentence) go through apply_ops findReplace with a target — do not rewrite the whole block; styling every occurrence of a phrase (e.g. bold each "TODO") uses setMatchedFont, and so does restyling every run of a given color or size (matchColor / matchFontSize) — never rewrite blocks or restyle whole blocks to fix a few runs;',
-  '- When the user has text selected, the message includes the selection block indexes and content; rewrite-style requests apply to the selection by default;',
-  '- When only part of a block is selected, the selected span is delimited by <sel>…</sel> and repeated as "Selected text": "this"/"the selected text" means exactly that span. Restyle it with apply_ops and target {"scope":"selection"} (run-level ops then touch only the selected characters); rewrite it with replace_selection. Never restyle or rewrite the whole block for a partial selection;',
+  '- For expansion, shortening, polishing, or rewriting of selected prose, call write_document with rewriteSelection:true. The editor streams a draft and waits for the user to apply or discard it. A partial selection is marked by <sel>…</sel>. Keep all surrounding text outside the edit;',
+  '- For explicitly requested literal corrections, use scoped findReplace or replace_selection. Use apply_ops with scope:"selection" for selected-text formatting. Use a whole-document rewrite only for an explicit whole-document request without an active selection;',
   '- Web search: use web_search when you need up-to-date information/data/fact checking; search before writing about uncertain facts — do not fabricate;',
   '- Illustrations: when the user wants pictures, first image_search (English keywords work better) → pick a suitable result → insert_image with its imageUrl; when the user asks to generate/draw a picture, or search cannot match the needed illustration, use generate_image with a detailed English prompt;',
   '- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (the user accepts/rejects revisions in the Review tab);',
@@ -1445,6 +1445,21 @@ export function inheritBlockFormatting(
   })
 }
 
+/** Compare document content without the transient AI highlight. */
+function sameNodeIgnoringAiHighlight(before: ProseMirrorNode, after: ProseMirrorNode): boolean {
+  if (before === after) return true
+  const attrs =
+    before.attrs.aiChanged === after.attrs.aiChanged
+      ? after.attrs
+      : { ...after.attrs, aiChanged: before.attrs.aiChanged }
+  return (
+    before.childCount === after.childCount &&
+    before.text === after.text &&
+    before.hasMarkup(after.type, attrs, after.marks) &&
+    before.children.every((child, index) => sameNodeIgnoringAiHighlight(child, after.child(index)))
+  )
+}
+
 /**
  * Replace the top-level block range with the parsed nodes (marked aiChanged).
  * The new blocks inherit the replaced blocks' formatting (see
@@ -1529,9 +1544,9 @@ export function replaceBlockRange(
     editor.view.dispatch(tr)
     return true
   }
-  editor.view.dispatch(
-    editor.state.tr.replaceWith(from, to, pmNodes).setMeta(TRACK_AUTHOR, aiRevisionAuthor()),
-  )
+  const tr = editor.state.tr.replaceWith(from, to, pmNodes)
+  if (sameNodeIgnoringAiHighlight(tr.before, tr.doc)) return false
+  editor.view.dispatch(tr.setMeta(TRACK_AUTHOR, aiRevisionAuthor()))
   return true
 }
 
@@ -1547,8 +1562,9 @@ export function replaceInlineRange(
   to: number,
   nodes: ProseMirrorNode[],
   track?: AiTrack,
-): void {
+): boolean {
   const tr = editor.state.tr
+  if (tr.doc.slice(from, to).content.eq(Fragment.from(nodes))) return false
   const blockPos = tr.doc.resolve(from).before(1)
   const inserted = nodes.reduce((size, n) => size + n.nodeSize, 0)
   if (track) {
@@ -1567,6 +1583,7 @@ export function replaceInlineRange(
     tr.setMeta(TRACK_AUTHOR, aiRevisionAuthor())
   }
   editor.view.dispatch(tr)
+  return true
 }
 
 /** insert the parsed nodes after the given top-level block index */

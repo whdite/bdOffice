@@ -149,6 +149,12 @@ export const vi = {
   aiSumWriteDocumentFailed: 'Viết nội dung thất bại',
   aiSumWriteDocumentPartial: 'Đã viết một phần nội dung',
   aiWritingDocument: 'Đang viết tài liệu · {blocks} khối',
+  aiDraftWriting: 'Đang viết trong tài liệu',
+  aiDraftReady: 'Bản nháp đã sẵn sàng',
+  aiDraftSelectText: 'Chọn văn bản trong một đoạn hoặc chọn nguyên các đoạn.',
+  aiDraftSelectionChanged: 'Vùng chọn đã thay đổi. Hãy chọn lại văn bản.',
+  aiDraftReplace: 'Thay thế văn bản gốc',
+  aiDraftInsert: 'Chèn bên dưới',
   aiPartialTitle: 'Chỉ một phần nội dung được viết',
   aiPartialBody:
     'Đã nhận được {blocks} khối trước khi quá trình viết dừng lại. Giữ lại phần này hay hủy bỏ?',

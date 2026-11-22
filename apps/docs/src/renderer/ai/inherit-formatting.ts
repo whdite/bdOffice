@@ -9,9 +9,88 @@
  * set for tables, whose cells only ever reach the model as plain text.
  */
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { firstTextMarksIn, FORMAT_MARKS, PARA_FORMAT_ATTRS } from '../editor/caret-marks'
 import { inlineToRuns, pmTableToModel, type PmMark, type PmNode } from '../editor/convert'
+import { isTrackedDeleted } from './doc-utils'
 
 const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name === 'del')
+
+const INSERTION_PARA_ATTRS = [
+  ...PARA_FORMAT_ATTRS,
+  'keepNext',
+  'keepLines',
+  'widowControl',
+  'suppressLineNumbers',
+  'bidiInherited',
+  'markSize',
+] as const
+const TEXT_BLOCK_TYPES = new Set(['docParagraph', 'docHeading', 'docListItem'])
+
+/** Snapshot each selected paragraph's format and the first run inside its selected portion. */
+export function createSelectionInsertionFormatter(
+  doc: ProseMirrorNode,
+  range: { from: number; to: number },
+): (nodes: PmNode[]) => PmNode[] {
+  const sources: Array<{ block: ProseMirrorNode; marks: PmMark[] }> = []
+  doc.nodesBetween(range.from, range.to, (block, pos) => {
+    if (TEXT_BLOCK_TYPES.has(block.type.name) && !isTrackedDeleted(block)) {
+      const from = Math.max(0, range.from - pos - 1)
+      const to = Math.min(block.content.size, range.to - pos - 1)
+      const marks = from < to ? firstTextMarksIn(block, from, to) : null
+      const formatting: PmMark[] = (marks ?? [])
+        .filter((mark) => FORMAT_MARKS.has(mark.type.name))
+        .map((mark) => {
+          const json: PmMark = mark.toJSON()
+          if (json.type !== 'docTextStyle' || !json.attrs) return json
+          // The original run's opaque XML can contain revision data.
+          const { rawRPr: _rawRPr, ...attrs } = json.attrs
+          return { ...json, attrs }
+        })
+      sources.push({ block, marks: formatting })
+    }
+    return false
+  })
+  return (nodes) => {
+    let index = 0
+    return nodes.map((node) => {
+      if (!TEXT_BLOCK_TYPES.has(node.type)) return node
+      const source = sources[Math.min(index++, sources.length - 1)]
+      if (!source) return node
+      const old = source.block.attrs
+      const type = node.type === 'docParagraph' ? source.block.type.name : node.type
+      const sameType = type === source.block.type.name
+      const attrs = { ...node.attrs }
+      for (const key of INSERTION_PARA_ATTRS) {
+        if (attrs[key] == null && old[key] != null && (key !== 'styleId' || sameType))
+          attrs[key] = old[key]
+      }
+      if (type === 'docHeading' && sameType && node.type === 'docParagraph') {
+        attrs.level = old.level
+        attrs.outlineOnly = old.outlineOnly
+      }
+      if (type === 'docListItem' && sameType && (attrs.kind == null || attrs.kind === old.kind)) {
+        attrs.kind = old.kind
+        attrs.numId = old.numId
+        attrs.ilvl = old.ilvl
+      }
+      const content = node.content?.map((child) => {
+        if (child.type !== 'text' || source.marks.length === 0) return child
+        const marks = new Map(source.marks.map((mark) => [mark.type, mark]))
+        for (const mark of child.marks ?? []) {
+          const inherited = marks.get(mark.type)
+          marks.set(
+            mark.type,
+            mark.type === 'docTextStyle' && inherited
+              ? { ...mark, attrs: { ...inherited.attrs, ...mark.attrs } }
+              : mark,
+          )
+        }
+        return { ...child, marks: [...marks.values()] }
+      })
+      return { ...node, type, attrs, ...(content ? { content } : {}) }
+    })
+  }
+}
 
 // ---- text blocks ----
 

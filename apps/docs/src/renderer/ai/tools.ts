@@ -3,14 +3,17 @@ import { assertFullContent } from '../phased-content'
 import { hasDocumentDraft, DRAFT_IO_ERROR } from './draft-state'
 import type { Mark, Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ChartDisplay, CommentInfo, NewChart, NoteInfo } from '@genoffice/docx-engine'
-import type { ToolDisplay } from '@genoffice/agent-core'
+import type { ToolExecution as AgentToolExecution } from '@genoffice/agent-core'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
 import { t } from '../i18n/locale'
 import { MIND_MAP_LIMITS, MIND_MAP_TOOL, parseMindMapTree } from '@genoffice/agent-core/mind-map'
 import { executeOps, opNames } from './ops'
 import { clipExcerpt, repliesOf, resolveCommentAnchor } from './comment-ops'
 import { redactTextBetween } from './redact-view'
+import { REDACT_MARK } from './redact'
 import { insertPictureAtSelection } from '../editor/insert-picture'
+import { createSelectionInsertionFormatter } from './inherit-formatting'
+import { selectionCoversBlocks } from './doc-utils'
 import {
   PAGE_SETUP_TOOL,
   SECTION_BREAK_TOOL,
@@ -143,7 +146,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'write_document',
     description:
-      '[For long new content: a whole document, a chapter, a full report, article or translation] Hands the writing to the system writer, which streams restricted HTML straight into the document while the user watches; you never write the text yourself. Give a concrete plan (title, section outline with the key points of each, tone, target length) and put every fact, figure, name and quote the text must use into context — the writer sees only the plan and context, not the conversation. Omit afterBlockIndex on a blank document; on a document with content, pass afterBlockIndex to insert after that block, or replaceDocument=true when the user asked to rewrite everything. Short additions (a paragraph or two) use insert_content instead.',
+      'Streams a draft into the document for new writing, full prose rewrites, and polishing, expanding, shortening, or translating a selection. Give the writer a concrete plan and the facts, figures, names and quotes it needs in context. For selected text inside one paragraph, or a selection covering whole text paragraphs, set rewriteSelection=true. The system reads the selected text and asks the user how to apply the draft. Omit afterBlockIndex on a blank document. In a document with content, pass afterBlockIndex for an insertion, or replaceDocument=true for a user-requested full rewrite.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -166,6 +169,11 @@ export const AGENT_TOOLS: AgentToolDef[] = [
           type: 'boolean',
           description:
             'true replaces all existing content (only when the user asked for a rewrite)',
+        },
+        rewriteSelection: {
+          type: 'boolean',
+          description:
+            'Preview a revision of the selected text. Omit afterBlockIndex and replaceDocument.',
         },
       },
       required: ['plan'],
@@ -192,7 +200,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'replace_selection',
     description:
-      "Replace exactly the user's selected text (the <sel>…</sel> span in the context) with new inline content, leaving the rest of the block untouched. For rewording/translating/correcting a selected phrase or sentence inside a paragraph. The new text inherits the selection's formatting unless the fragment styles it. Requires a range selection inside one paragraph/heading/list item; for whole blocks or several blocks use replace_blocks.",
+      "Apply a requested literal correction to the exact selection (the <sel>…</sel> span), leaving the rest of its paragraph untouched. The new text inherits the selection's formatting unless the fragment styles it. Requires a range inside one paragraph, heading or list item. For expansion, shortening, polishing or rewriting of selected prose, use write_document with rewriteSelection=true to preview before applying.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -721,18 +729,43 @@ export interface CommentAuthorMeta {
 export interface FrozenSelection {
   scope: SelectionScope
   doc: ProseMirrorNode
+  /** The user requested a rewrite, so only an accepted draft may change the selection. */
+  previewRewrite?: boolean
 }
 
-export interface ToolExecution {
-  /** result text fed back to the model */
-  output: string
-  isError?: boolean
+const SELECTION_CHANGED_ERROR =
+  'The original selection changed. Ask the user to select the text again before editing.'
+
+/** Body edits on the selected range, plus read and review tools. */
+const SELECTED_RANGE_TOOLS = new Set([
+  'get_document_context',
+  'read_blocks',
+  'read_revisions',
+  'read_comments',
+  'read_notes',
+  LIST_STYLES_TOOL.name,
+  MIND_MAP_TOOL.name,
+  'web_search',
+  'image_search',
+  'analyze_media',
+  'replace_selection',
+  'replace_blocks',
+  'write_document',
+  'apply_ops',
+  'add_comment',
+  'reply_comment',
+  'resolve_comment',
+])
+
+const SELECTION_WRITES = new Set(['replace_selection', 'replace_blocks', 'write_document', 'apply_ops'])
+
+export const toolAllowedInSelection = (name: string, previewRewrite = false): boolean =>
+  SELECTED_RANGE_TOOLS.has(name) &&
+  (!previewRewrite || name === 'write_document' || !SELECTION_WRITES.has(name))
+
+export interface ToolExecution extends AgentToolExecution {
   /** true when the tool changed the document */
   mutated: boolean
-  /** short human-readable label for the chat activity chip */
-  summary: string
-  /** UI-only side channel (never enters the LLM context) */
-  display?: ToolDisplay
 }
 
 const fail = (summary: string, output: string): ToolExecution => ({
@@ -740,6 +773,12 @@ const fail = (summary: string, output: string): ToolExecution => ({
   isError: true,
   mutated: false,
   summary,
+})
+
+const unchangedReplacement = (count: number): ToolExecution => ({
+  output: 'The replacement matches the original content and formatting. The document was unchanged.',
+  mutated: false,
+  summary: t('aiCmdNoneUnchanged', { count }),
 })
 
 const clipText = (text: string, max: number): string =>
@@ -1256,6 +1295,21 @@ export function executeTool(
   }
   if (hasDocumentDraft(editor)) return fail(call.name, DRAFT_IO_ERROR)
   const scope = frozen && frozen.doc === editor.state.doc ? frozen.scope : null
+  if (frozen?.scope.isRange) {
+    if (!toolAllowedInSelection(call.name, frozen.previewRewrite))
+      return fail(
+        call.name,
+        frozen.previewRewrite && SELECTION_WRITES.has(call.name)
+          ? 'Preview the selected rewrite with write_document and rewriteSelection=true.'
+          : 'The edit is scoped to the selected text. Use a selection tool.',
+      )
+    if (!scope && SELECTION_WRITES.has(call.name)) {
+      const failure = fail(t('aiSumReplaceSelection'), SELECTION_CHANGED_ERROR)
+      return call.name === 'write_document'
+        ? { ...failure, finalReply: t('aiDraftSelectionChanged') }
+        : failure
+    }
+  }
   const staleSummary = staleSummaryOf(call)
   if (staleSummary && editedExternally(editor)) return fail(staleSummary(), STALE_DOC_ERROR)
   const settle = (exec: ToolExecution): ToolExecution => {
@@ -1278,8 +1332,19 @@ export function executeTool(
   ) {
     return executeAsyncTool(editor, call, signal)
   }
-  if (call.name === 'write_document')
-    return writeDocument(editor, call, numIds, track, signal, writer)
+  if (call.name === 'write_document') {
+    if (scope?.isRange && call.input.rewriteSelection !== true)
+      return fail(t('aiSumReplaceSelection'), 'A selected draft requires rewriteSelection=true.')
+    return writeDocument(
+      editor,
+      call,
+      numIds,
+      track,
+      signal,
+      writer,
+      scope,
+    )
+  }
   if (call.name === 'set_watermark' && typeof call.input.image === 'string')
     return setPictureWatermark(call, signal, extras)
   return settle(
@@ -1294,15 +1359,92 @@ async function writeDocument(
   track: AiTrack | undefined,
   signal: AbortSignal | undefined,
   writer: AiDocWriter | undefined,
+  scope: SelectionScope | null,
 ): Promise<ToolExecution> {
   const summary = t('aiSumWriteDocument')
+  const rewriteSelection = call.input.rewriteSelection === true
+  const failDraft = (
+    label: string,
+    output: string,
+    reply = t('aiSumWriteDocumentFailed'),
+  ): ToolExecution => ({
+    ...fail(label, output),
+    ...(rewriteSelection ? { finalReply: reply } : {}),
+  })
   const plan = String(call.input.plan ?? '').trim()
-  if (!plan) return fail(summary, 'plan must not be empty')
-  if (!writer) return fail(summary, 'document writing is not available here')
+  if (!plan) return failDraft(summary, 'plan must not be empty')
+  if (!writer) return failDraft(summary, 'document writing is not available here')
   const count = editor.state.doc.childCount
   const afterRaw = call.input.afterBlockIndex
   let position: WritePosition
-  if (afterRaw !== undefined && afterRaw !== null) {
+  let selection:
+    | {
+        from: number
+        to: number
+        start: number
+        end: number
+        inline: boolean
+        formatInsertion: ReturnType<typeof createSelectionInsertionFormatter>
+      }
+    | undefined
+  let selectedText: string | undefined
+  if (rewriteSelection) {
+    const range = selectionRange(editor, scope)
+    if (!range)
+      return failDraft(
+        summary,
+        'Select text in the document before asking for a selection rewrite.',
+        t('aiDraftSelectText'),
+      )
+    const doc = editor.state.doc
+    const $from = doc.resolve(range.from)
+    const $to = doc.resolve(range.to)
+    const inline = $from.depth === 1 && $from.sameParent($to) && $from.parent.isTextblock
+    const startsAfterText =
+      !inline && $from.depth === 1 && $from.parentOffset === $from.parent.content.size
+    const endsBeforeText = !inline && $to.depth === 1 && $to.parentOffset === 0
+    const start = $from.index(0) + (startsAfterText ? 1 : 0)
+    const end = Math.min($to.index(0) - (endsBeforeText ? 1 : 0), doc.childCount - 1)
+    const wholeParagraphs =
+      start <= end &&
+      selectionCoversBlocks(editor, start, end, range) &&
+      Array.from({ length: end - start + 1 }, (_, i) => doc.child(start + i)).every(
+        (node) => node.isTextblock,
+      )
+    if (!inline && !wholeParagraphs)
+      return failDraft(
+        summary,
+        'Live selection rewriting needs text in one paragraph or a selection of complete text paragraphs.',
+        t('aiDraftSelectText'),
+      )
+    const bounds = blockRangePositions(editor, start, end)
+    const textRange = inline ? range : { from: bounds.from + 1, to: bounds.to - 1 }
+    let includesProtectedContent = false
+    doc.nodesBetween(textRange.from, textRange.to, (node) => {
+      if (
+        node.isInline &&
+        ((!node.isText && node.type.name !== 'hardBreak') ||
+          node.marks.some((mark) => mark.type.name === REDACT_MARK || mark.type.name === 'del'))
+      )
+        includesProtectedContent = true
+    })
+    if (includesProtectedContent)
+      return failDraft(
+        summary,
+        'Select editable text without images, fields, redactions or tracked deletions for a live rewrite.',
+      )
+    selectedText = redactTextBetween(editor.getJSON(), textRange.from, textRange.to, '\n')
+    if (!selectedText.trim())
+      return failDraft(summary, 'The selection contains no text to rewrite.', t('aiDraftSelectText'))
+    selection = {
+      ...textRange,
+      start,
+      end,
+      inline,
+      formatInsertion: createSelectionInsertionFormatter(doc, textRange),
+    }
+    position = { kind: 'after', index: end }
+  } else if (afterRaw !== undefined && afterRaw !== null) {
     if (!Number.isInteger(afterRaw) || Number(afterRaw) < -1 || Number(afterRaw) >= count)
       return fail(summary, rangeError(editor))
     position = { kind: 'after', index: Number(afterRaw) }
@@ -1315,61 +1457,147 @@ async function writeDocument(
     )
   }
   const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v))
-  const draft = new DraftLanding(editor, numIds, position)
+  const review = selection
+    ? 'selection'
+    : position.kind === 'whole' && !isBlankDocument(editor)
+      ? 'document'
+      : undefined
+  const draft = new DraftLanding(editor, numIds, position, selection?.formatInsertion)
   let result: DocWriteResult
   let rendered: string | null
+  let insertBelow: typeof selection
+  const writeFailure = (error: unknown): ToolExecution =>
+    failDraft(t('aiSumWriteDocumentFailed'), error instanceof Error ? error.message : String(error))
   try {
-    result = await writer.write(
-      {
-        plan,
-        title: str(call.input.title),
-        context: str(call.input.context),
-        instruction: '',
-      },
-      (html) => draft.update(html),
-      signal,
-    )
-  } finally {
-    rendered = draft.finish()
+    try {
+      result = await writer.write(
+        {
+          plan,
+          title: str(call.input.title),
+          context: str(call.input.context),
+          instruction: '',
+          review,
+          selectedText,
+        },
+        (html, ready) => draft.update(html, ready),
+        signal,
+      )
+      if (result.decision === 'insert') insertBelow = selection
+    } finally {
+      rendered = draft.finish()
+    }
+  } catch (error) {
+    if (rewriteSelection) return writeFailure(error)
+    throw error
   }
-  if (editor.isDestroyed) return fail(summary, 'the document was closed')
-  if (draft.externalEdits && position.kind === 'whole' && call.input.replaceDocument === true)
-    return fail(
+  if (editor.isDestroyed) return failDraft(summary, 'the document was closed')
+  if (result.decision === 'discard')
+    return {
+      output: 'The user discarded this draft.',
+      mutated: false,
       summary,
-      'The document was edited while the writer was running; the rewrite was not applied. Read the current document before retrying.',
+      finalReply: t('aiStopped'),
+    }
+  if (
+    draft.externalEdits &&
+    (selection || (position.kind === 'whole' && call.input.replaceDocument === true))
+  )
+    return failDraft(
+      summary,
+      insertBelow
+        ? 'The document changed while the draft was being written, so it was not inserted.'
+        : 'The document was edited while the writer was running; the rewrite was not applied. Read the current document before retrying.',
     )
   if (!result.ok || !result.html) {
-    return fail(
+    return failDraft(
       t('aiSumWriteDocumentFailed'),
       `The writer produced nothing (${result.error ?? 'no output'}); the document is unchanged. Tell the user briefly and offer to try again.`,
     )
   }
+  if (review && result.decision !== 'replace' && !insertBelow)
+    return failDraft(summary, 'The user has not accepted the draft.')
+  const echo = toolEchoError(result.html) ?? contextMarkerError(result.html)
+  if (echo) return failDraft(summary, echo)
   let nodes: ReturnType<typeof parseHtmlFragment>
   try {
-    nodes = parseHtmlFragment(result.html, numIds)
-  } catch (e) {
-    // a kept partial can end mid-formula: land what the user saw rendered instead
-    if (!result.truncated || !rendered)
-      return fail(t('aiSumWriteDocumentFailed'), e instanceof Error ? e.message : String(e))
-    nodes = parseHtmlFragment(rendered, numIds)
+    try {
+      nodes = parseHtmlFragment(result.html, numIds)
+    } catch (error) {
+      // A kept partial can end mid-formula: land what the user saw rendered instead.
+      if (!result.truncated || !rendered) throw error
+      nodes = parseHtmlFragment(rendered, numIds)
+    }
+    nodes = resolveImageRefs(editor, nodes).nodes
+  } catch (error) {
+    return writeFailure(error)
   }
-  nodes = resolveImageRefs(editor, nodes).nodes
   if (nodes.length === 0)
-    return fail(
+    return failDraft(
       t('aiSumWriteDocumentFailed'),
       'the writer output did not parse into any content blocks',
     )
+  if (insertBelow) {
+    try {
+      insertBlocksAfter(editor, insertBelow.end, insertBelow.formatInsertion(nodes), track)
+    } catch (error) {
+      return writeFailure(error)
+    }
+    markDocSeen(editor)
+    const inserted = t('aiSumInsertedBlocks', { count: nodes.length })
+    return {
+      output: result.truncated
+        ? 'Inserted the accepted partial draft below the original selection.'
+        : 'Inserted the accepted draft below the original selection.',
+      mutated: true,
+      summary: inserted,
+      finalReply: result.truncated ? `${inserted}\n\n${t('aiSumWriteDocumentPartial')}` : inserted,
+    }
+  }
   // a blank document or an explicit rewrite replaces everything; text the user typed
   // into a formerly blank document while the draft streamed is kept, the content goes into the draft's slot
-  if (
+  let mutated: boolean
+  if (selection) {
+    if (selection.inline) {
+      if (!nodes.every((node) => ['docParagraph', 'docHeading', 'docListItem'].includes(node.type)))
+        return failDraft(
+          summary,
+          'The replacement must contain text paragraphs. Use a separate insertion for other content.',
+        )
+      const inline = nodes.flatMap((node, index) => [
+        ...(index === 0 ? [] : [{ type: 'hardBreak' }]),
+        ...(node.content ?? []),
+      ])
+      if (inline.length === 0) return failDraft(summary, 'The draft does not contain replacement text.')
+      mutated = applyInlineReplacement(editor, selection, inline, track) !== null
+    } else {
+      mutated = replaceBlockRange(editor, selection.start, selection.end, nodes, track)
+    }
+  } else if (
     position.kind === 'whole' &&
     (isBlankDocument(editor) || call.input.replaceDocument === true)
   ) {
-    replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes, track)
+    mutated = replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes, track)
   } else {
-    insertBlocksAfter(editor, draft.indexBefore(), nodes, track)
+    mutated = insertBlocksAfter(editor, draft.indexBefore(), nodes, track)
   }
   markDocSeen(editor)
+  if (!mutated) {
+    const unchanged = unchangedReplacement(selection ? selection.end - selection.start + 1 : count)
+    return result.decision === 'replace'
+      ? { ...unchanged, finalReply: unchanged.summary }
+      : unchanged
+  }
+  if (review && result.decision === 'replace') {
+    const replaced = selection ? t('aiSumReplaceSelection') : summary
+    return {
+      output: selection
+        ? 'Replaced only the original selection with the accepted draft.'
+        : 'Replaced the document with the accepted draft.',
+      mutated: true,
+      summary: replaced,
+      finalReply: result.truncated ? `${replaced}\n\n${t('aiSumWriteDocumentPartial')}` : replaced,
+    }
+  }
   const note = result.truncated
     ? ' The stream ended early, so the content is INCOMPLETE (the user chose to keep it): the tail is missing. Say so and offer to finish the missing sections with write_document (afterBlockIndex at the end) or insert_content.'
     : ''
@@ -1378,6 +1606,30 @@ async function writeDocument(
     mutated: true,
     summary: result.truncated ? t('aiSumWriteDocumentPartial') : summary,
   }
+}
+
+function applyInlineReplacement(
+  editor: Editor,
+  range: { from: number; to: number },
+  inline: ReturnType<typeof parseInlineFragment>,
+  track: AiTrack | undefined,
+): ProseMirrorNode[] | null {
+  const schema = editor.schema
+  const $from = editor.state.doc.resolve(range.from)
+  const fragmentStyled = inline.some((n) => n.type === 'text' && (n.marks ?? []).length > 0)
+  const anchor = $from.parent.childAfter($from.parentOffset).node
+  const inherited = (anchor?.marks ?? []).filter(
+    (m) =>
+      !REVISION_MARK_TYPES.has(m.type.name) &&
+      !(fragmentStyled && FRAGMENT_MARK_TYPES.has(m.type.name)),
+  )
+  const nodes = inline.map((n) => {
+    if (n.type !== 'text') return schema.nodeFromJSON(n)
+    let marks: readonly Mark[] = inherited
+    for (const m of n.marks ?? []) marks = schema.markFromJSON(m).addToSet(marks)
+    return schema.text(n.text ?? '', marks)
+  })
+  return replaceInlineRange(editor, range.from, range.to, nodes, track) ? nodes : null
 }
 
 function executeSyncTool(
@@ -1477,7 +1729,8 @@ function executeSyncTool(
       const count = editor.state.doc.childCount
       if (isBlankDocument(editor)) {
         // the blank template's single empty paragraph gets replaced
-        replaceBlockRange(editor, 0, count - 1, nodes, track)
+        if (!replaceBlockRange(editor, 0, count - 1, nodes, track))
+          return unchangedReplacement(count)
         return {
           output: `Inserted ${nodes.length} block(s) (the document was empty). Block indexes have changed; use get_document_context if needed.`,
           mutated: true,
@@ -1501,6 +1754,11 @@ function executeSyncTool(
     case 'replace_blocks': {
       const range = validRange(editor, call.input.startBlockIndex, call.input.endBlockIndex)
       if (!range) return fail(t('aiSumReplaceContent'), rangeError(editor))
+      if (scope?.isRange) {
+        const selected = selectionRange(editor, scope)
+        if (!selected || !selectionCoversBlocks(editor, range.start, range.end, selected))
+          return fail(t('aiSumReplaceSelection'), 'Use replace_selection for a partial paragraph.')
+      }
       const html = String(call.input.html ?? '')
       const echo = toolEchoError(html) ?? contextMarkerError(html)
       if (echo) return fail(t('aiSumReplaceContent'), echo)
@@ -1521,7 +1779,8 @@ function executeSyncTool(
           .map((k) => `${k.block}.${k.index}`),
       ).size
       const lost = had - keptInRange
-      replaceBlockRange(editor, range.start, range.end, nodes, track)
+      if (!replaceBlockRange(editor, range.start, range.end, nodes, track))
+        return unchangedReplacement(range.end - range.start + 1)
       const pictureNote =
         lost > 0
           ? ` ${lost} picture(s) that were in the replaced range are not in the new content and have been deleted${track ? ' (as a tracked change the user can reject)' : ' (the user can undo this)'}; tell the user if that was not intended. To keep pictures, include their <img src="doc:B.I"> tags from read_blocks in the new HTML.`
@@ -1563,26 +1822,12 @@ function executeSyncTool(
       if (inline.length === 0) {
         return fail(t('aiSumReplaceSelection'), 'html did not parse into any text')
       }
-      const schema = editor.schema
-      // a carried-over picture's own marks are not the model restyling the selection
-      const fragmentStyled = inline.some((n) => n.type === 'text' && (n.marks ?? []).length > 0)
-      const anchor = $from.parent.childAfter($from.parentOffset).node
-      const inherited = (anchor?.marks ?? []).filter(
-        (m) =>
-          !REVISION_MARK_TYPES.has(m.type.name) &&
-          !(fragmentStyled && FRAGMENT_MARK_TYPES.has(m.type.name)),
-      )
-      const nodes = inline.map((n) => {
-        if (n.type !== 'text') return schema.nodeFromJSON(n)
-        let marks: readonly Mark[] = inherited
-        for (const m of n.marks ?? []) marks = schema.markFromJSON(m).addToSet(marks)
-        return schema.text(n.text ?? '', marks)
-      })
       const blockIndex = $from.index(0)
       // the echo quotes what was replaced back to the model, so a selection
       // covering a withheld span would undo the withholding right here
       const oldText = redactTextBetween(editor.getJSON(), range.from, range.to, ' ')
-      replaceInlineRange(editor, range.from, range.to, nodes, track)
+      const nodes = applyInlineReplacement(editor, range, inline, track)
+      if (!nodes) return unchangedReplacement(1)
       const newText = nodes.map((n) => n.textContent).join('')
       return {
         output: `Replaced the selected text in block ${blockIndex}: "${clipText(oldText, 200)}" → "${clipText(newText, 200)}". The rest of the block is unchanged; the new text is now selected.`,
@@ -2135,6 +2380,7 @@ function executeSyncTool(
         numIds,
         track,
         selection: scope,
+        selectionOnly: scope?.isRange === true,
         dryRun,
         styles: extras?.styles,
       })

@@ -151,6 +151,12 @@ export const nl = {
   aiSumWriteDocumentFailed: 'Schrijven mislukt',
   aiSumWriteDocumentPartial: 'Inhoud gedeeltelijk geschreven',
   aiWritingDocument: 'Document wordt geschreven · {blocks} blokken',
+  aiDraftWriting: 'Tekst wordt in het document geschreven',
+  aiDraftReady: 'Concept klaar',
+  aiDraftSelectText: 'Selecteer tekst binnen één alinea of selecteer hele alinea’s.',
+  aiDraftSelectionChanged: 'De selectie is gewijzigd. Selecteer de tekst opnieuw.',
+  aiDraftReplace: 'Oorspronkelijke tekst vervangen',
+  aiDraftInsert: 'Hieronder invoegen',
   aiPartialTitle: 'Slechts een deel van de inhoud is geschreven',
   aiPartialBody:
     '{blocks} blokken kwamen aan voordat het schrijven stopte. Dit deel behouden of weggooien?',

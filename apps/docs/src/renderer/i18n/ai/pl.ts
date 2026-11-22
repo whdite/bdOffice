@@ -150,6 +150,12 @@ export const pl = {
   aiSumWriteDocumentFailed: 'Pisanie nie powiodło się',
   aiSumWriteDocumentPartial: 'Napisano część treści',
   aiWritingDocument: 'Pisanie dokumentu · {blocks} bloków',
+  aiDraftWriting: 'Pisanie w dokumencie',
+  aiDraftReady: 'Wersja robocza jest gotowa',
+  aiDraftSelectText: 'Zaznacz tekst w jednym akapicie lub całe akapity.',
+  aiDraftSelectionChanged: 'Zaznaczenie się zmieniło. Zaznacz tekst ponownie.',
+  aiDraftReplace: 'Zastąp oryginalny tekst',
+  aiDraftInsert: 'Wstaw poniżej',
   aiPartialTitle: 'Napisano tylko część treści',
   aiPartialBody:
     'Dotarło {blocks} bloków, zanim pisanie zostało przerwane. Zachować tę część czy odrzucić?',

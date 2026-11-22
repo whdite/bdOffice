@@ -149,6 +149,12 @@ export const ms = {
   aiSumWriteDocumentFailed: 'Penulisan gagal',
   aiSumWriteDocumentPartial: 'Sebahagian kandungan ditulis',
   aiWritingDocument: 'Menulis dokumen · {blocks} blok',
+  aiDraftWriting: 'Menulis dalam dokumen',
+  aiDraftReady: 'Draf sedia',
+  aiDraftSelectText: 'Pilih teks dalam satu perenggan atau pilih perenggan penuh.',
+  aiDraftSelectionChanged: 'Pilihan telah berubah. Pilih semula teks.',
+  aiDraftReplace: 'Gantikan teks asal',
+  aiDraftInsert: 'Sisipkan di bawah',
   aiPartialTitle: 'Hanya sebahagian kandungan ditulis',
   aiPartialBody:
     '{blocks} blok diterima sebelum penulisan terhenti. Simpan bahagian ini atau buang?',

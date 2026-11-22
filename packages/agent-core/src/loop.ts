@@ -925,8 +925,8 @@ export class AgentLoop<TSnapshot = unknown> {
     this.trimHistory()
   }
 
-  /** images: inline attachments for this user turn (vision input; see AgentImage) */
-  run(instruction: string, images?: AgentImage[]): void {
+  /** An initial tool may come from an explicit editor action. It uses the normal approval and execution path. */
+  run(instruction: string, images?: AgentImage[], initialTool?: AgentToolCall): void {
     if (this.busy || !instruction) return
     this.taskContinuation = false
     this.taskMemoryContext = ''
@@ -989,7 +989,7 @@ export class AgentLoop<TSnapshot = unknown> {
       this.failRun(error)
       return
     }
-    void this.beginRun(userMsg, snapshot).catch((error) => this.failRun(error))
+    void this.beginRun(userMsg, snapshot, initialTool).catch((error) => this.failRun(error))
   }
 
   private foldEarlierDocumentContexts(hasFreshSnapshot: boolean): void {
@@ -1037,6 +1037,7 @@ export class AgentLoop<TSnapshot = unknown> {
   private async beginRun(
     userMsg: AgentMessage,
     snapshot?: DocumentContextSnapshot,
+    initialTool?: AgentToolCall,
   ): Promise<void> {
     const generation = this.generation
     if (this.persistenceAvailable()) {
@@ -1063,7 +1064,7 @@ export class AgentLoop<TSnapshot = unknown> {
     const execution = this.options.taskExecution?.() ?? this.options.persistence?.taskExecution?.()
     try {
       // Durable tasks count each provider call. Use mechanical compaction before admission.
-      await this.maybeCompact(!execution)
+      await this.maybeCompact(!execution && !initialTool)
     } catch {
       // Proceed with the run even if compaction fails (an over-budget history only costs more, it's still correct)
     }
@@ -1121,6 +1122,16 @@ export class AgentLoop<TSnapshot = unknown> {
       this.clearRunTimeout()
       this.rollbackFailedRun()
       this.options.events?.onDone?.({ text: '', cancelled: true, turnLimit: false })
+      return
+    }
+    if (initialTool && !this.taskContinuation) {
+      this.handle = null
+      this.turnText = ''
+      this.turnReasoning = ''
+      this.turnStopReason = null
+      this.toolCalls = [initialTool]
+      this.offeredToolDefinitions = this.options.skill.tools
+      await this.finishTurn()
       return
     }
     this.startTurn()
@@ -1635,6 +1646,7 @@ export class AgentLoop<TSnapshot = unknown> {
     this.turnUsage = null
     // Some transports emit an extra onDone after cancel — this turn may finalize only once
     let settled = false
+    let completedByTool = false
     try {
       let runtimeTools: Promise<unknown> = Promise.resolve()
       let runtimeCallSeen = false
@@ -1756,6 +1768,21 @@ export class AgentLoop<TSnapshot = unknown> {
                 execution,
                 snapshotBefore: firstMutation ? snapshot : undefined,
               })
+              if (execution.finalReply !== undefined) {
+                const closeStream = !settled
+                settled = true
+                completedByTool = true
+                if (closeStream) {
+                  try {
+                    this.handle?.cancel()
+                  } catch {
+                    // The local action is already recorded; ignore provider cancellation errors.
+                  }
+                }
+                this.squashStaleToolOutputs()
+                this.completeRun({ text: execution.finalReply, cancelled: false, turnLimit: false })
+                return execution
+              }
               this.turns++
               this.finalizing = this.observeToolOutcome(call, execution)
               if (this.turns >= (this.options.maxTurns ?? DEFAULT_MAX_TURNS))
@@ -1790,7 +1817,9 @@ export class AgentLoop<TSnapshot = unknown> {
             }
             settled = true
             const finish = () =>
-              generation === this.generation ? this.finishTurn() : Promise.resolve()
+              generation === this.generation && !completedByTool
+                ? this.finishTurn()
+                : Promise.resolve()
             // Ordinary API completion retains its synchronous state transition;
             // only vendor-managed tools need an in-flight execution drain.
             void (runtimeCallSeen ? runtimeTools.then(finish) : finish()).catch((error) =>
@@ -1969,29 +1998,12 @@ export class AgentLoop<TSnapshot = unknown> {
           }
         }
       }
-      this.clearResponseChecks()
-      // Models often end a tool-using run with an empty text turn ("I'm done").
-      // Leaving assistant text empty in history then poisons the next user
-      // prompt: Anthropic rejects empty content arrays, Gemini rejects empty
-      // parts, and OpenAI-compatible routes send content:null with no tool_calls —
-      // all of which make follow-up turns fail or return empty again (see
-      // genoffice#12 / #22: first prompt works, second shows "no summary").
-      // Same normalization as restore(), applied unconditionally: cancelled and
-      // read-only empty turns poison follow-ups just the same. onDone still
-      // reports the raw turn text so app UIs keep their localized fallbacks
-      // instead of surfacing this English placeholder.
-      this.history.push({ role: 'assistant', text: this.turnText || COMPLETED_VIA_TOOLS_TEXT })
-      this.running = false
-      this.clearRunTimeout()
-      this.runUserMsg = null
-      this.mergeRunUsage()
-      events?.onDone?.({
+      this.completeRun({
         text: this.turnText,
         cancelled: this.cancelled,
         turnLimit: this.finalizing === 'turn-limit',
         // set only when true so exact-shape consumers/tests stay unaffected
         ...(this.turnStopReason === 'max_tokens' && !this.cancelled ? { truncated: true } : {}),
-        ...(this.runUsage ? { usage: this.runUsage } : {}),
       })
       return
     }
@@ -2016,6 +2028,7 @@ export class AgentLoop<TSnapshot = unknown> {
     })
     const generation = this.generation
     const results: AgentToolResult[] = []
+    let finalReply: string | undefined
     let loopBreak: { reason: Exclude<FinalizingReason, 'turn-limit'>; toolName: string } | null =
       null
     let turnMutated = false
@@ -2025,6 +2038,16 @@ export class AgentLoop<TSnapshot = unknown> {
     let unusableInTurn = false
     let executedInTurn = false
     for (const rawCall of toolCalls) {
+      if (finalReply !== undefined) {
+        // Keep the existing tool calls paired with results for the next user request.
+        results.push({
+          id: rawCall.id,
+          name: rawCall.name,
+          output: 'The user-confirmed action ended this run; this tool was not executed.',
+          isError: true,
+        })
+        continue
+      }
       const tool = skill.tools.find((t) => t.name === rawCall.name)
       const call =
         rawCall.truncated || rawCall.inputError || this.options.editorHarness
@@ -2136,6 +2159,10 @@ export class AgentLoop<TSnapshot = unknown> {
         execution,
         snapshotBefore: firstMutation ? snapshot : undefined,
       })
+      if (execution.finalReply !== undefined) {
+        finalReply = execution.finalReply
+        continue
+      }
       const reason = this.observeToolOutcome(call, execution)
       if (reason) loopBreak = { reason, toolName: call.name }
     }
@@ -2153,6 +2180,11 @@ export class AgentLoop<TSnapshot = unknown> {
       this.redundantReadTurns = 0
     }
     this.history.push({ role: 'tool', results })
+    if (finalReply !== undefined) {
+      this.squashStaleToolOutputs()
+      this.completeRun({ text: finalReply, cancelled: false, turnLimit: false })
+      return
+    }
     if (this.taskQuestion) {
       this.finishWithQuestion()
       return
@@ -2257,6 +2289,18 @@ export class AgentLoop<TSnapshot = unknown> {
     this.squashStaleToolOutputs()
     events?.onTurnEnd?.()
     this.startTurn()
+  }
+
+  private completeRun(result: AgentRunResult): void {
+    this.clearResponseChecks()
+    // Preserve valid assistant content in history for providers that reject empty messages.
+    // The UI still receives the raw text so it can use its localized fallback.
+    this.history.push({ role: 'assistant', text: result.text || COMPLETED_VIA_TOOLS_TEXT })
+    this.running = false
+    this.clearRunTimeout()
+    this.runUserMsg = null
+    this.mergeRunUsage()
+    this.options.events?.onDone?.({ ...result, ...(this.runUsage ? { usage: this.runUsage } : {}) })
   }
 
   private clearResponseChecks(): void {

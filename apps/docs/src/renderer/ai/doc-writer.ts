@@ -1,6 +1,8 @@
 import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import type { Transaction } from '@tiptap/pm/state'
+import { Plugin, PluginKey, Selection, type Transaction } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import type { PmNode } from '../editor/convert'
 import { TABLE_TRAILING_SKIP } from '../editor/extensions'
 import { TRACK_IGNORE } from '../editor/revisions'
 import { assertNoDocumentDraft, setDocumentDraft } from './draft-state'
@@ -15,12 +17,16 @@ import { blockRangePositions, HTML_RULES, parseHtmlFragment, type NumIds } from 
  */
 export const DOC_MAX_CHARS = 200_000
 const CONTEXT_CAP = 8000
-const DRAFT_TICK_MS = 300
+const DRAFT_TICK_MS = 70
+
+export type DraftDecision = 'replace' | 'insert' | 'discard'
 
 export interface DocWriteSpec {
   plan: string
   title?: string | undefined
   context?: string | undefined
+  review?: 'document' | 'selection' | undefined
+  selectedText?: string | undefined
   /** the user's own request, verbatim */
   instruction: string
 }
@@ -31,6 +37,7 @@ export interface DocWriteResult {
   html?: string
   /** the stream ended early: transport drop, stop, or output cap */
   truncated?: boolean
+  decision?: DraftDecision
   error?: string
 }
 
@@ -38,7 +45,7 @@ export interface DocWriteResult {
 export interface AiDocWriter {
   write(
     spec: DocWriteSpec,
-    onProgress: (html: string) => void,
+    onProgress: (html: string, ready?: boolean) => void,
     signal?: AbortSignal,
   ): Promise<DocWriteResult>
 }
@@ -66,9 +73,12 @@ export function buildDocWriterRequest(
   const instruction = spec.instruction.trim()
     ? `\n\n## The user's request\n${spec.instruction.slice(0, 2000)}`
     : ''
+  const selection = spec.selectedText
+    ? `\n\n## Text to revise\n${spec.selectedText}\n\nWrite only the revised passage. Use paragraphs for its text. Keep facts and names from the passage. Avoid adding a document title or unrelated sections.`
+    : ''
   return {
     system: WRITER_SYSTEM + langDirective,
-    user: `## Plan\n${spec.title ? `Title: ${spec.title}\n` : ''}${spec.plan.slice(0, 6000)}${context}${instruction}\n\nWrite the content now.`,
+    user: `## Plan\n${spec.title ? `Title: ${spec.title}\n` : ''}${spec.plan.slice(0, 6000)}${context}${instruction}${selection}\n\nWrite the content now.`,
   }
 }
 
@@ -91,6 +101,58 @@ export type WritePosition = { kind: 'whole' } | { kind: 'after'; index: number }
 /** meta on every draft transaction: not an edit, not history, not a tracked change */
 export const DRAFT_META = 'aiDraft'
 
+const draftDecorations = new PluginKey<DecorationSet>('docAiDraftDecorations')
+
+interface DraftRange {
+  from: number
+  to: number
+  writing: boolean
+}
+
+function draftEnd(doc: ProseMirrorNode, from: number, to: number): number | undefined {
+  if (to <= from) return
+  const end = Selection.findFrom(doc.resolve(to), -1, true)?.head
+  return end !== undefined && end > from && end < to ? end : undefined
+}
+
+function draftDecorationPlugin() {
+  return new Plugin<DecorationSet>({
+    key: draftDecorations,
+    state: {
+      init: () => DecorationSet.empty,
+      apply(tr, previous) {
+        const range = tr.getMeta(draftDecorations) as DraftRange | null | undefined
+        if (range === undefined) return previous.map(tr.mapping, tr.doc)
+        if (!range || range.from === range.to) return DecorationSet.empty
+        const decorations: Decoration[] = []
+        tr.doc.nodesBetween(range.from, range.to, (node, pos) => {
+          decorations.push(
+            Decoration.node(pos, pos + node.nodeSize, { class: 'doc-ai-draft-block' }),
+          )
+          return false
+        })
+        const end = range.writing ? draftEnd(tr.doc, range.from, range.to) : undefined
+        if (end !== undefined) {
+          decorations.push(
+            Decoration.widget(
+              end,
+              () => {
+                const marker = document.createElement('span')
+                marker.className = 'doc-ai-draft-caret'
+                marker.setAttribute('aria-hidden', 'true')
+                return marker
+              },
+              { key: 'doc-ai-draft-caret', side: -1 },
+            ),
+          )
+        }
+        return DecorationSet.create(tr.doc, decorations)
+      },
+    },
+    props: { decorations: (state) => draftDecorations.getState(state) },
+  })
+}
+
 /**
  * Live draft of a streaming fragment inside the document. Each tick re-parses
  * the fragment received so far (the HTML parser closes open tags, so a
@@ -109,7 +171,8 @@ export class DraftLanding {
   private pending: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private closed = false
-  private follow = true
+  private ready = false
+  private lastTick = -Infinity
   private readonly onTransaction = ({ transaction }: { transaction: Transaction }) => {
     if (!transaction.docChanged || transaction.getMeta(DRAFT_META)) return
     this.externalEdits = true
@@ -121,6 +184,7 @@ export class DraftLanding {
     private readonly editor: Editor,
     private readonly numIds: NumIds,
     position: WritePosition,
+    private readonly formatNodes?: (nodes: PmNode[]) => PmNode[],
   ) {
     assertNoDocumentDraft(editor)
     setDocumentDraft(editor, true)
@@ -131,14 +195,20 @@ export class DraftLanding {
         ? blockRangePositions(editor, position.index, position.index).to
         : 0
     this.to = this.from
+    editor.registerPlugin(draftDecorationPlugin())
     editor.on('transaction', this.onTransaction)
   }
 
   /** latest cumulative fragment; rendered on the next tick */
-  update(html: string): void {
+  update(html: string, ready = false): void {
     if (this.closed) return
     this.pending = html
-    if (this.timer === null) this.timer = setTimeout(() => this.flush(), DRAFT_TICK_MS)
+    this.ready = ready
+    const delay = DRAFT_TICK_MS - (performance.now() - this.lastTick)
+    if (ready || delay <= 0) {
+      if (this.timer !== null) clearTimeout(this.timer)
+      this.flush()
+    } else if (this.timer === null) this.timer = setTimeout(() => this.flush(), delay)
   }
 
   /** the top-level block index the draft sits after (-1 = document start), after any user edits */
@@ -166,14 +236,19 @@ export class DraftLanding {
       this.flush()
       this.editor.off('transaction', this.onTransaction)
       if (this.to > this.from && !this.editor.isDestroyed)
-        this.editor.view.dispatch(this.draftTr().delete(this.from, this.to))
+        this.editor.view.dispatch(
+          this.draftTr().delete(this.from, this.to).setMeta(draftDecorations, null),
+        )
       this.to = this.from
       return this.rendered
     } finally {
       this.closed = true
       this.editor.off('transaction', this.onTransaction)
       setDocumentDraft(this.editor, false)
-      if (!this.editor.isDestroyed) this.editor.setEditable(this.wasEditable, false)
+      if (!this.editor.isDestroyed) {
+        this.editor.unregisterPlugin(draftDecorations)
+        this.editor.setEditable(this.wasEditable, false)
+      }
     }
   }
 
@@ -198,11 +273,13 @@ export class DraftLanding {
   private flush(): void {
     this.timer = null
     if (this.closed || this.pending === null || this.editor.isDestroyed) return
+    this.lastTick = performance.now()
     const html = this.pending
     this.pending = null
     let next: ProseMirrorNode[]
     try {
-      next = parseHtmlFragment(html, this.numIds).map((n) =>
+      const parsed = parseHtmlFragment(html, this.numIds)
+      next = (this.formatNodes ? this.formatNodes(parsed) : parsed).map((n) =>
         this.editor.schema.nodeFromJSON({ ...n, attrs: { ...n.attrs, aiChanged: false } }),
       )
     } catch {
@@ -213,31 +290,57 @@ export class DraftLanding {
     const live = this.liveNodes()
     let keep = 0
     while (keep < live.length && keep < next.length && live[keep]!.node.eq(next[keep]!)) keep++
-    if (keep === live.length && keep === next.length) return
+    if (keep === live.length && keep === next.length) {
+      if (this.ready)
+        this.editor.view.dispatch(
+          this.draftTr().setMeta(draftDecorations, {
+            from: this.from,
+            to: this.to,
+            writing: false,
+          }),
+        )
+      return
+    }
     const at = keep > 0 ? live[keep - 1]!.end : this.from
-    const wasVisible = this.follow && this.endVisible()
-    this.editor.view.dispatch(this.draftTr().replaceWith(at, this.to, next.slice(keep)))
-    this.to = at + next.slice(keep).reduce((size, n) => size + n.nodeSize, 0)
+    const wasVisible = this.endVisible()
+    const replacement = next.slice(keep)
+    const to = at + replacement.reduce((size, n) => size + n.nodeSize, 0)
+    this.editor.view.dispatch(
+      this.draftTr().replaceWith(at, this.to, replacement).setMeta(draftDecorations, {
+        from: this.from,
+        to,
+        writing: !this.ready,
+      }),
+    )
+    this.to = to
     if (wasVisible) this.scrollToEnd()
-    else this.follow = false
+  }
+
+  private scrollFrame(): { element: HTMLElement; top: number; bottom: number } | undefined {
+    const element = this.editor.view.dom.closest<HTMLElement>('.editor-scroll')
+    if (!element) return
+    const { top, bottom } = element.getBoundingClientRect()
+    return { element, top, bottom }
   }
 
   private endVisible(): boolean {
-    if (this.to === this.from) return true
     try {
-      const { top } = this.editor.view.coordsAtPos(this.to - 1)
-      return top >= 0 && top <= window.innerHeight
+      const pos = draftEnd(this.editor.state.doc, this.from, this.to) ?? this.from
+      const { top, bottom } = this.editor.view.coordsAtPos(pos)
+      const frame = this.scrollFrame()
+      return bottom >= (frame?.top ?? 0) && top <= (frame?.bottom ?? window.innerHeight) + 4
     } catch {
       return true
     }
   }
 
   private scrollToEnd(): void {
-    if (this.to === this.from) return
     try {
-      const { node } = this.editor.view.domAtPos(this.to - 1)
-      const el = node instanceof Element ? node : node.parentElement
-      el?.scrollIntoView?.({ block: 'nearest' })
+      const pos = draftEnd(this.editor.state.doc, this.from, this.to)
+      const frame = this.scrollFrame()
+      if (pos === undefined || !frame) return
+      const { bottom } = this.editor.view.coordsAtPos(pos)
+      if (bottom > frame.bottom - 44) frame.element.scrollTop += bottom - frame.bottom + 56
     } catch {
       /* layout not ready */
     }

@@ -151,6 +151,12 @@ export const fr = {
   aiSumWriteDocumentFailed: 'Échec de la rédaction',
   aiSumWriteDocumentPartial: 'Contenu partiellement rédigé',
   aiWritingDocument: 'Rédaction du document · {blocks} blocs',
+  aiDraftWriting: 'Rédaction dans le document',
+  aiDraftReady: 'Brouillon prêt',
+  aiDraftSelectText: 'Sélectionnez du texte dans un seul paragraphe ou des paragraphes entiers.',
+  aiDraftSelectionChanged: 'La sélection a changé. Sélectionnez à nouveau le texte.',
+  aiDraftReplace: 'Remplacer le texte d’origine',
+  aiDraftInsert: 'Insérer en dessous',
   aiPartialTitle: "Le contenu n'a été rédigé qu'en partie",
   aiPartialBody:
     "{blocks} blocs sont arrivés avant l'arrêt de la rédaction. Conserver cette partie ou l'abandonner ?",

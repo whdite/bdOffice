@@ -152,6 +152,12 @@ export const pt = {
   aiSumWriteDocumentFailed: 'Falha ao escrever',
   aiSumWriteDocumentPartial: 'Conteúdo escrito parcialmente',
   aiWritingDocument: 'Escrevendo o documento · {blocks} blocos',
+  aiDraftWriting: 'Escrevendo no documento',
+  aiDraftReady: 'Rascunho pronto',
+  aiDraftSelectText: 'Selecione texto dentro de um parágrafo ou parágrafos inteiros.',
+  aiDraftSelectionChanged: 'A seleção mudou. Selecione o texto novamente.',
+  aiDraftReplace: 'Substituir o texto original',
+  aiDraftInsert: 'Inserir abaixo',
   aiPartialTitle: 'Apenas parte do conteúdo foi escrita',
   aiPartialBody:
     '{blocks} blocos chegaram antes de a escrita parar. Manter esta parte ou descartar?',

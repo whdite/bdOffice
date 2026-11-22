@@ -148,6 +148,12 @@ export const en = {
   aiSumWriteDocumentFailed: 'Writing failed',
   aiSumWriteDocumentPartial: 'Wrote part of the content',
   aiWritingDocument: 'Writing the document · {blocks} blocks',
+  aiDraftWriting: 'Writing on the page',
+  aiDraftReady: 'Draft ready',
+  aiDraftSelectText: 'Select text within one paragraph or select whole paragraphs.',
+  aiDraftSelectionChanged: 'The selection changed. Select the text again.',
+  aiDraftReplace: 'Replace original',
+  aiDraftInsert: 'Insert below',
   aiPartialTitle: 'Only part of the content was written',
   aiPartialBody:
     '{blocks} blocks arrived before the writing stopped. Keep this part or discard it?',

@@ -19,6 +19,22 @@ export function blockRangePositions(
   return { from, to }
 }
 
+/** Text blocks require their full text. Atom and container blocks require the whole node. */
+export function selectionCoversBlocks(
+  editor: Editor,
+  startIndex: number,
+  endIndex: number,
+  selection: { from: number; to: number },
+): boolean {
+  const { from, to } = blockRangePositions(editor, startIndex, endIndex)
+  const first = editor.state.doc.child(startIndex)
+  const last = editor.state.doc.child(endIndex)
+  return (
+    selection.from <= from + (first.isTextblock ? 1 : 0) &&
+    selection.to >= to - (last.isTextblock ? 1 : 0)
+  )
+}
+
 // ---- tracked deletions (pending revisions are not current content) ----
 
 const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name === 'del')

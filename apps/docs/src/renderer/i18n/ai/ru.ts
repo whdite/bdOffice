@@ -150,6 +150,12 @@ export const ru = {
   aiSumWriteDocumentFailed: 'Не удалось написать текст',
   aiSumWriteDocumentPartial: 'Текст написан частично',
   aiWritingDocument: 'Пишу документ · {blocks} блоков',
+  aiDraftWriting: 'Пишу в документе',
+  aiDraftReady: 'Черновик готов',
+  aiDraftSelectText: 'Выделите текст внутри одного абзаца или целые абзацы.',
+  aiDraftSelectionChanged: 'Выделение изменилось. Выделите текст снова.',
+  aiDraftReplace: 'Заменить исходный текст',
+  aiDraftInsert: 'Вставить ниже',
   aiPartialTitle: 'Текст написан лишь частично',
   aiPartialBody:
     'Получено {blocks} блоков, после чего написание прервалось. Оставить эту часть или отменить?',

@@ -5,7 +5,7 @@ import type { Transaction } from '@tiptap/pm/state'
 import { generateTocFieldXml, type TabStop, type TocEntry } from '@genoffice/docx-engine'
 import { isEastAsianFontName } from '../font-list'
 import { t } from '../i18n/locale'
-import { blockRangePositions, isTrackedDeleted, liveText } from './doc-utils'
+import { blockRangePositions, isTrackedDeleted, liveText, selectionCoversBlocks } from './doc-utils'
 import { tabSpecsToStops, validateTabs, type TabSpec } from './tab-stops'
 import { styleOpDefs, type AiStyleAccess } from './style-ops'
 import { fieldOpDefs } from './field-ops'
@@ -90,6 +90,8 @@ export interface OpContext {
    * partial selection character-precise; without them the block range is used.
    */
   selection?: { startIndex: number; endIndex: number; from?: number; to?: number } | null
+  /** A user request sent with a selection cannot change text outside that range. */
+  selectionOnly?: boolean
   /** who issues the batch: the model (default) or the app's own UI (ribbon, shortcuts, dialogs) */
   source?: 'ai' | 'ui'
   /** flag changed blocks with the yellow AI highlight (default: only for source 'ai') */
@@ -1605,6 +1607,15 @@ for (const def of styleOpDefs({
 
 // ---- entry point ----
 
+const CHARACTER_SELECTION_OPS = new Set(['findReplace', 'setFont', 'setMatchedFont'])
+const PARAGRAPH_SELECTION_OPS = new Set([
+  'setParagraphFormat',
+  'setHeadingLevel',
+  'setList',
+  'applyStyle',
+  'deleteBlocks',
+])
+
 /** frozen scope -> current PM positions: exact positions when captured, else the block range (indexes clamped: AI edits earlier in the run may have shrunk the doc) */
 function frozenSelectionRange(editor: Editor, frozen: OpContext['selection']): SelRange | null {
   if (!frozen) return null
@@ -1690,6 +1701,13 @@ const failure = (error: string): ExecuteOutcome => ({ ok: false, results: [], su
  */
 export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): ExecuteOutcome {
   if (!Array.isArray(ops) || ops.length === 0) return failure('ops must be a non-empty array')
+  const selection = frozenSelectionRange(editor, ctx.selection) ?? editor.state.selection
+  if (ctx.selectionOnly && (!ctx.selection || selection.from >= selection.to))
+    return failure('A text selection is required for these operations.')
+  const wholeParagraphs =
+    ctx.selectionOnly &&
+    ctx.selection &&
+    selectionCoversBlocks(editor, ctx.selection.startIndex, ctx.selection.endIndex, selection)
   const plan: string[] = []
   const errors: string[] = []
   const planned: Array<[Op, OpDef]> = []
@@ -1699,7 +1717,18 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
       errors.push(`${where}: must be an object with an "op" name field`)
       return
     }
-    const op = raw as Op
+    const requested = raw as Op
+    if (
+      ctx.selectionOnly &&
+      !CHARACTER_SELECTION_OPS.has(requested.op) &&
+      !(wholeParagraphs && PARAGRAPH_SELECTION_OPS.has(requested.op))
+    ) {
+      errors.push(`${where}: ${requested.op} cannot be limited to the selected text`)
+      return
+    }
+    const op: Op = ctx.selectionOnly
+      ? { ...requested, target: { ...requested.target, scope: 'selection' } }
+      : requested
     const def = REGISTRY.get(op.op)
     if (!def || (def.hidden && ctx.source !== 'ui')) {
       errors.push(`${where}: unknown op "${op.op}". Supported ops: [${opNames().join(', ')}]`)
@@ -1722,7 +1751,6 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
 
   const tr = editor.state.tr
   const schema = editor.schema
-  const selection = frozenSelectionRange(editor, ctx.selection) ?? editor.state.selection
   const results: OpResult[] = []
   try {
     for (const [op, def] of planned) {

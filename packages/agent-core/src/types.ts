@@ -97,6 +97,8 @@ export interface ToolExecution {
   denied?: boolean
   /** short human-readable label for activity UI */
   summary: string
+  /** Host-provided final reply. Ends the run after recording this tool result. */
+  finalReply?: string
   /**
    * Side-channel display: for UI only, never enters the LLM context.
    * Ignored when tool results are assembled into an AgentMessage.

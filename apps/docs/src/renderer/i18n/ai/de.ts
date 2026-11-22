@@ -153,6 +153,12 @@ export const de = {
   aiSumWriteDocumentFailed: 'Schreiben fehlgeschlagen',
   aiSumWriteDocumentPartial: 'Inhalt teilweise geschrieben',
   aiWritingDocument: 'Dokument wird geschrieben · {blocks} Blöcke',
+  aiDraftWriting: 'Text wird ins Dokument geschrieben',
+  aiDraftReady: 'Entwurf bereit',
+  aiDraftSelectText: 'Wählen Sie Text innerhalb eines Absatzes oder ganze Absätze aus.',
+  aiDraftSelectionChanged: 'Die Auswahl hat sich geändert. Wählen Sie den Text erneut aus.',
+  aiDraftReplace: 'Original ersetzen',
+  aiDraftInsert: 'Darunter einfügen',
   aiPartialTitle: 'Der Inhalt wurde nur teilweise geschrieben',
   aiPartialBody:
     '{blocks} Blöcke sind angekommen, bevor das Schreiben abbrach. Diesen Teil behalten oder verwerfen?',

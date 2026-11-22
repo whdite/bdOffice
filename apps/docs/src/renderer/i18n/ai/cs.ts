@@ -150,6 +150,12 @@ export const cs = {
   aiSumWriteDocumentFailed: 'Psaní se nezdařilo',
   aiSumWriteDocumentPartial: 'Obsah napsán částečně',
   aiWritingDocument: 'Píšu dokument · {blocks} bloků',
+  aiDraftWriting: 'Píšu do dokumentu',
+  aiDraftReady: 'Koncept je připraven',
+  aiDraftSelectText: 'Vyberte text v jednom odstavci nebo celé odstavce.',
+  aiDraftSelectionChanged: 'Výběr se změnil. Vyberte text znovu.',
+  aiDraftReplace: 'Nahradit původní text',
+  aiDraftInsert: 'Vložit pod text',
   aiPartialTitle: 'Napsala se jen část obsahu',
   aiPartialBody:
     'Dorazilo {blocks} bloků, než se psaní přerušilo. Ponechat tuto část, nebo zahodit?',

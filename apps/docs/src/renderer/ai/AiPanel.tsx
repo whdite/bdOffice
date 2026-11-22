@@ -18,6 +18,7 @@ import {
   useChatRunQueue,
 } from '@genoffice/ui'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { aiRevisionAuthor } from './revision-author'
 import type { Editor } from '@tiptap/core'
 import type { Block } from '@genoffice/docx-engine'
@@ -47,18 +48,21 @@ import {
   truncateCardName,
 } from '@genoffice/ui'
 import type { PmNode } from '../editor/convert'
+import { TABLE_TRAILING_SKIP } from '../editor/extensions'
 import { restoreAgentRound } from '../editor/restore-agent-round'
-import { countWords, findNumId, type NumIds } from './protocol'
+import { countWords, findNumId, getSelectionScope, type NumIds } from './protocol'
 import { DOC_NAV_SCHEME, navigateToBlock, parseDocNavHref } from './doc-nav'
 import {
   markDocSeen,
   type AiCommentsAccess,
   type AiDocExtras,
   type AiHeaderFooterAccess,
+  type FrozenSelection,
 } from './tools'
 import type { AiPageSetupAccess } from './page-setup'
 import type { AiNotesAccess } from './note-ops'
 import { createDocsSkill } from './docs-skill'
+import { isSelectionDraftTrial, selectionDraftRequest } from './selection-draft'
 import { MindMapCard } from './MindMapCard'
 import { insertPictureAtSelection } from '../editor/insert-picture'
 import {
@@ -66,6 +70,7 @@ import {
   countFragmentBlocks,
   DOC_MAX_CHARS,
   extractFragment,
+  type DraftDecision,
   type DocWriteResult,
   type DocWriteSpec,
 } from './doc-writer'
@@ -199,6 +204,12 @@ interface ChatEntry {
 
 /** longest selection excerpt echoed on a user bubble */
 const SCOPE_TEXT_MAX = 200
+
+interface SentSelection {
+  frozen: FrozenSelection
+  documentGeneration: number
+  quote?: AiScopeQuoteData
+}
 
 /** clickable starter prompts for the empty state (fill the input, do not send) —
  * blank documents get generation starters, documents with content get edit starters */
@@ -374,7 +385,7 @@ export function AiPanel({
   /** messages queued while a reply runs; the pump re-runs them through runWith on settle */
   const msgQueue = useChatRunQueue<{
     attachments: AttachmentMeta[]
-    scope: AiScopeQuoteData | null
+    scope: SentSelection | null
   }>({
     busy,
     submit: (text, meta) => {
@@ -401,9 +412,12 @@ export function AiPanel({
       .catch(() => undefined)
   }
   const [chat, setChat] = useState<ChatEntry[]>([])
-  /** a streamed write stopped early: the draft stays in the document until the user keeps or discards it */
-  const [activePartial, setActivePartial] = useState<{ blocks: number } | null>(null)
-  const partialResolverRef = useRef<((keep: boolean) => void) | null>(null)
+  const [writingDraft, setWritingDraft] = useState(false)
+  const [draftReview, setDraftReview] = useState<{
+    kind?: DocWriteSpec['review']
+    partial: boolean
+  } | null>(null)
+  const draftDecisionRef = useRef<((decision: DraftDecision) => void) | null>(null)
   /** bumped by New chat / unmount: a writer resuming after its abort must not open the keep card */
   const writerEpochRef = useRef(0)
   /** Past conversation restored from JSONL (read-only transcript, not fed to the model) */
@@ -508,8 +522,8 @@ export function AiPanel({
   useEffect(
     () => () => {
       writerEpochRef.current++
-      partialResolverRef.current?.(false)
-      partialResolverRef.current = null
+      draftDecisionRef.current?.('discard')
+      draftDecisionRef.current = null
     },
     [],
   )
@@ -539,8 +553,9 @@ export function AiPanel({
   attachedSkillsRef.current = attachedSkills
   /** attachments consumed by the most recent send — retry resends the same set */
   const lastAttachmentsRef = useRef<AttachmentMeta[]>([])
-  /** the scope quote of the last send, so a retry reuses it instead of re-reading the live selection */
-  const lastScopeRef = useRef<AiScopeQuoteData | undefined>(undefined)
+  /** Retry and queued requests retain the range they originally targeted. */
+  const lastScopeRef = useRef<SentSelection | null>(null)
+  const requestedSelectionRef = useRef<FrozenSelection | null>(null)
   /** composer attachments plus everything already sent this session (deduped by path) */
   const availableAttachments = (): AttachmentMeta[] => {
     const seen = new Set<string>()
@@ -720,7 +735,7 @@ export function AiPanel({
    */
   const runDocWriter = async (
     spec: DocWriteSpec,
-    onProgress: (html: string) => void,
+    onProgress: (html: string, ready?: boolean) => void,
     signal?: AbortSignal,
   ): Promise<DocWriteResult> => {
     const { system, user } = buildDocWriterRequest(
@@ -728,6 +743,7 @@ export function AiPanel({
       aiLangDirective(),
     )
     const epoch = writerEpochRef.current
+    setWritingDraft(true)
     let closed = false
     let chipTimer: ReturnType<typeof setTimeout> | null = null
     let latest = ''
@@ -760,33 +776,31 @@ export function AiPanel({
     if (outcome.status === 'empty' && !signal?.aborted) outcome = await attempt()
     closed = true
     if (chipTimer !== null) clearTimeout(chipTimer)
-    if (outcome.status === 'complete') return { ok: true, html: outcome.text }
-    if (outcome.status === 'empty') return { ok: false, error: outcome.error }
     if (epoch !== writerEpochRef.current) return { ok: false, error: 'the chat was reset' }
-    // the draft stays in the document while the user decides
-    const keep = await new Promise<boolean>((resolve) => {
-      partialResolverRef.current = resolve
-      setActivePartial({ blocks: countFragmentBlocks(outcome.text) })
+    setWritingDraft(false)
+    if (outcome.status === 'empty') return { ok: false, error: outcome.error }
+    const partial = outcome.status === 'partial'
+    if (!partial && !spec.review) return { ok: true, html: outcome.text }
+    onProgress(outcome.text, true)
+    const decision = await new Promise<DraftDecision>((resolve) => {
+      draftDecisionRef.current = resolve
+      setDraftReview({ kind: spec.review, partial })
     })
-    return keep
-      ? { ok: true, html: outcome.text, truncated: true }
-      : {
-          ok: false,
-          error: `${outcome.reason}${outcome.error ? `: ${outcome.error}` : ''}; the user discarded the partial content`,
-        }
+    return { ok: decision !== 'discard', html: outcome.text, truncated: partial, decision }
   }
   const runDocWriterRef = useRef(runDocWriter)
   runDocWriterRef.current = runDocWriter
 
-  const decidePartial = (keep: boolean): void => {
-    partialResolverRef.current?.(keep)
-    partialResolverRef.current = null
-    setActivePartial(null)
+  const decideDraft = (decision: DraftDecision): void => {
+    draftDecisionRef.current?.(decision)
+    draftDecisionRef.current = null
+    setDraftReview(null)
   }
   /** New chat / unmount: discard an open keep card and keep a still-settling writer from opening one */
   const abandonWriter = (): void => {
     writerEpochRef.current++
-    decidePartial(false)
+    setWritingDraft(false)
+    decideDraft('discard')
   }
 
   const loopRef = useRef<AgentLoop<PmNode> | null>(null)
@@ -833,6 +847,7 @@ export function AiPanel({
           () => docExtrasRef.current,
           () => notesAccessRef.current,
           () => mediaAnalysisAvailable(settingsRef.current, false),
+          () => requestedSelectionRef.current,
         ),
         createFilesSkill(availableAttachments),
         createSkillsSkill(),
@@ -1022,16 +1037,23 @@ export function AiPanel({
     editor.commands.setTextSelection(editor.state.selection.to)
   }
 
-  const selectionScopeQuote = (): AiScopeQuoteData | undefined => {
+  const captureSentSelection = (): SentSelection | null => {
     const { from, to, empty } = editor.state.selection
-    if (empty) return undefined
+    if (empty) return null
     const text = redactTextBetween(editor.getJSON() as RedactableNode, from, to, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-    if (!text) return undefined
     return {
-      label: t('aiScopeSelection', { words: countWords(text) }),
-      text: text.length > SCOPE_TEXT_MAX ? `${text.slice(0, SCOPE_TEXT_MAX)}…` : text,
+      frozen: { scope: getSelectionScope(editor), doc: editor.state.doc },
+      documentGeneration: currentDocGeneration(),
+      ...(text
+        ? {
+            quote: {
+              label: t('aiScopeSelection', { words: countWords(text) }),
+              text: text.length > SCOPE_TEXT_MAX ? `${text.slice(0, SCOPE_TEXT_MAX)}…` : text,
+            },
+          }
+        : {}),
     }
   }
 
@@ -1104,14 +1126,34 @@ export function AiPanel({
     instruction: string,
     displayInstruction = instruction,
     attachmentsOverride?: AttachmentMeta[],
-    /** null = a retry that had no scope; undefined = capture the live selection */
-    retryScope?: AiScopeQuoteData | null,
+    /** null = a document request; undefined = capture the live selection */
+    selectionOverride?: SentSelection | null,
     /** only the composer's own send takes the attached skills along */
     attachSkills = false,
   ) => {
     const loop = loopRef.current
     if (!instruction || !loop || loop.busy || runStartingRef.current || pendingSendRef.current)
       return
+    const command = instruction.trim().replace(/[。！？.!?]+$/u, '')
+    const documentPreview = /^(?:试整篇重写|試整篇重寫)$/u.test(command)
+    const wholeDocument =
+      documentPreview ||
+      instruction === t('ribbonEditorPrompt') ||
+      instruction === t('aiPolishPrompt')
+    const sentSelection = wholeDocument
+      ? null
+      : selectionOverride !== undefined
+        ? selectionOverride
+        : captureSentSelection()
+    if (isSelectionDraftTrial(command) && !sentSelection) {
+      showToast(t('aiDraftSelectText'), 'error')
+      return
+    }
+    if (sentSelection && sentSelection.documentGeneration !== currentDocGeneration()) {
+      showToast(t('aiDraftSelectionChanged'), 'error')
+      return
+    }
+    const selectionDraft = sentSelection ? selectionDraftRequest(instruction) : undefined
     runStartingRef.current = true
     const generation = ++runGenerationRef.current
     setInput('')
@@ -1130,14 +1172,8 @@ export function AiPanel({
     // skills ride with this one message only: the chips clear like attachments do
     const sentSkills = attachSkills ? attachedSkillsRef.current : []
     if (sentSkills.length > 0) setAttachedSkills([])
-    // the queue batch and the continue action carry their own display text: no selection quote
-    const scope =
-      retryScope !== undefined
-        ? (retryScope ?? undefined)
-        : displayInstruction === instruction
-          ? selectionScopeQuote()
-          : undefined
-    lastScopeRef.current = scope
+    const scope = sentSelection?.quote
+    lastScopeRef.current = sentSelection
     // the popover input / composer own the DOM selection now: keep the targeted range visible until the run ends
     if (scope) setInactiveSelectionShown(editor, true)
     instructionRef.current = instruction
@@ -1176,7 +1212,14 @@ export function AiPanel({
       })
       // a phased open still streaming its tail: the context must describe the whole document
       .then(async (images) => {
-        await Promise.all([waitForFullContent(), refreshKbFiles()])
+        const prompt = documentPreview
+          ? `${instruction}\n\nRead the original and generate a preview of the entire rewritten document with write_document and replaceDocument=true.`
+          : instruction
+        const [, , prepared] = await Promise.all([
+          waitForFullContent(),
+          refreshKbFiles(),
+          withSkillBodies(prompt, sentSkills),
+        ])
         // a newer send (after New chat) owns the panel now: leave its state alone
         if (pendingSendRef.current !== pending) return
         pendingSendRef.current = null
@@ -1193,7 +1236,23 @@ export function AiPanel({
           setBusy(false)
           return
         }
-        return loop.run(await withSkillBodies(instruction, sentSkills), images)
+        requestedSelectionRef.current = sentSelection
+          ? { ...sentSelection.frozen, previewRewrite: !!selectionDraft }
+          : null
+        return loop.run(
+          prepared,
+          images,
+          selectionDraft?.standalone && sentAtts.length === 0 && sentSkills.length === 0
+            ? {
+                id: crypto.randomUUID(),
+                name: 'write_document',
+                input: {
+                  rewriteSelection: true,
+                  plan: selectionDraft.plan,
+                },
+              }
+            : undefined,
+        )
       })
       .catch((error: unknown) => {
         if (!mountedRef.current || generation !== runGenerationRef.current) return
@@ -1245,6 +1304,18 @@ export function AiPanel({
       setBusy(false)
     }
   }
+  const stopDraftRef = useRef(cancel)
+  stopDraftRef.current = cancel
+  useEffect(() => {
+    if (!writingDraft) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return
+      event.preventDefault()
+      stopDraftRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [writingDraft])
 
   /** submit every still-anchored queued edit as one batch run */
   const sendQueue = () => {
@@ -1260,7 +1331,7 @@ export function AiPanel({
     // consumed at send: the run rewrites the anchored passages, which would
     // orphan the anchors anyway; a failed run is retried via the retry action
     onQueueConsume?.(editQueue.map((item) => item.qid))
-    runWith(instruction, display)
+    runWith(instruction, display, undefined, null)
   }
 
   const retry = () =>
@@ -1268,10 +1339,10 @@ export function AiPanel({
       lastInstructionRef.current,
       lastInstructionRef.current,
       lastAttachmentsRef.current,
-      lastScopeRef.current ?? null,
+      lastScopeRef.current,
     )
 
-  const continueRun = () => runWith(DOCS_CONTINUE_INSTRUCTION, t('aiContinue'))
+  const continueRun = () => runWith(DOCS_CONTINUE_INSTRUCTION, t('aiContinue'), undefined, null)
 
   /** Enter while a reply runs: the draft joins the queue above the composer */
   const enqueueDraft = () => {
@@ -1288,7 +1359,7 @@ export function AiPanel({
       ]
       setAttachments([])
     }
-    msgQueue.enqueue(text, { attachments, scope: selectionScopeQuote() ?? null })
+    msgQueue.enqueue(text, { attachments, scope: captureSentSelection() })
     setInput('')
   }
 
@@ -1430,19 +1501,60 @@ export function AiPanel({
     resizer.setPointerCapture(e.pointerId)
   }
 
-  // collapsed: rail only — after all hooks, so the instance and its state survive
+  const draftTitle = draftReview
+    ? t(draftReview.partial ? 'aiPartialTitle' : 'aiDraftReady')
+    : t('aiDraftWriting')
+  const draftControls = (writingDraft || draftReview) && (
+    <div className="doc-ai-draft-bar" role="group" aria-label={draftTitle}>
+      <span className="doc-ai-draft-message" role="status">
+        {draftTitle}
+      </span>
+      {draftReview ? (
+        <>
+          <button type="button" className="ai-queue-discard" onClick={() => decideDraft('discard')}>
+            {t('aiPartialDiscard')}
+          </button>
+          {draftReview.kind === 'selection' && (
+            <button
+              type="button"
+              className="ai-queue-discard"
+              onClick={() => decideDraft('insert')}
+            >
+              {t('aiDraftInsert')}
+            </button>
+          )}
+          <button type="button" className="ai-queue-send" onClick={() => decideDraft('replace')}>
+            {t(draftReview.kind ? 'aiDraftReplace' : 'aiPartialAdopt')}
+          </button>
+        </>
+      ) : (
+        <button type="button" className="ai-queue-discard" onClick={cancel}>
+          {t('aiStop')} <kbd>Esc</kbd>
+        </button>
+      )}
+    </div>
+  )
+  const draftHost =
+    draftControls && editor && !editor.isDestroyed ? editor.view.dom.closest('.editor-area') : null
+  const draftOverlay = draftHost
+    ? createPortal(<div className="doc-ai-draft-layer">{draftControls}</div>, draftHost)
+    : null
+  // The document controls stay available while the chat sidebar is collapsed.
   if (!open) {
-    // the sidebar setting is off: nothing to show until an explicit AI action opens the panel
-    if (hideRail) return null
     return (
-      <button
-        className="ai-rail"
-        data-tip={t('appExpandAiPanel')}
-        aria-label={t('appExpandAiPanel')}
-        onClick={onExpand}
-      >
-        <GensparkMark size={22} />
-      </button>
+      <>
+        {draftOverlay}
+        {!hideRail && (
+          <button
+            className="ai-rail"
+            data-tip={t('appExpandAiPanel')}
+            aria-label={t('appExpandAiPanel')}
+            onClick={onExpand}
+          >
+            <GensparkMark size={22} />
+          </button>
+        )}
+      </>
     )
   }
 
@@ -1464,6 +1576,7 @@ export function AiPanel({
       }}
       onDrop={onDrop}
     >
+      {draftOverlay}
       <div
         className="ai-panel-resizer"
         onPointerDown={startResize}
@@ -1724,28 +1837,7 @@ export function AiPanel({
 
       <div className="ai-composer">
         {attachNotice && <div className="ai-attach-notice">{attachNotice}</div>}
-        {activePartial && (
-          <div className="ai-queue ai-partial-card" role="group" aria-label={t('aiPartialTitle')}>
-            <div className="ai-queue-head">
-              <span className="ai-queue-title">{t('aiPartialTitle')}</span>
-            </div>
-            <div className="ai-queue-hint">
-              {t('aiPartialBody', { blocks: activePartial.blocks })}
-            </div>
-            <div className="ai-queue-foot">
-              <button
-                type="button"
-                className="ai-queue-discard"
-                onClick={() => decidePartial(false)}
-              >
-                {t('aiPartialDiscard')}
-              </button>
-              <button type="button" className="ai-queue-send" onClick={() => decidePartial(true)}>
-                {t('aiPartialAdopt')}
-              </button>
-            </div>
-          </div>
-        )}
+        {!draftHost && draftControls}
         {revisionCount > 0 && (
           <div className="ai-revision-bar" role="group" aria-label={t('aiRevisionBarTitle')}>
             <button

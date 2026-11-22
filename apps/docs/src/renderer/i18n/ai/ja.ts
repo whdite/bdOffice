@@ -149,6 +149,12 @@ export const ja = {
   aiSumWriteDocumentFailed: '本文の作成に失敗しました',
   aiSumWriteDocumentPartial: '本文の一部を作成しました',
   aiWritingDocument: '文書を作成中 · {blocks} ブロック',
+  aiDraftWriting: '文書に書き込み中',
+  aiDraftReady: '下書きができました',
+  aiDraftSelectText: '1つの段落内のテキスト、または段落全体を選択してください。',
+  aiDraftSelectionChanged: '選択範囲が変わりました。テキストを選び直してください。',
+  aiDraftReplace: '元の文を置換',
+  aiDraftInsert: '下に挿入',
   aiPartialTitle: '本文の一部しか作成されませんでした',
   aiPartialBody:
     '{blocks} ブロックを受信した時点で作成が中断しました。この部分を採用しますか、破棄しますか？',
