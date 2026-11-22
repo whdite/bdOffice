@@ -5,13 +5,10 @@
  * straight off disk; `npm run dev` only starts renderer vite servers and never
  * rebuilds preloads, so after a pull the artifact can silently miss newly added
  * preload APIs (calls fail with "... is not a function" in the renderer console
- * only). Runs as the root `predev` hook: a fresh tree is a fast no-op, a stale
- * app gets a full `electron-vite build` (the only entry point that emits the
- * preload bundle).
+ * only). The root `predev` hook builds just the stale preload bundles.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { join, resolve } from 'node:path'
 
 const APPS = ['docs', 'sheets', 'slides', 'pdf', 'markdown', 'html']
 
@@ -87,17 +84,15 @@ const stale = APPS.filter((app) => {
 
 if (stale.length) {
   console.log(`Rebuilding stale preloads: ${stale.join(', ')}`)
+  const [{ resolveConfig }, { build }] = await Promise.all([
+    import('electron-vite'),
+    import('vite'),
+  ])
+  process.env.NODE_ENV_ELECTRON_VITE = 'production'
   for (const app of stale) {
-    const r = spawnSync('npm', ['run', 'build', '-w', `@genoffice/${app}`], {
-      stdio: 'inherit',
-      // Windows has npm.cmd / npm.ps1, not npm.exe; spawn without a shell
-      // looks up npm.exe only and fails with ENOENT.
-      shell: process.platform === 'win32',
-    })
-    if (r.error) {
-      console.error(r.error)
-      process.exit(1)
-    }
-    if (r.status !== 0) process.exit(r.status ?? 1)
+    const root = resolve('apps', app)
+    const { config } = await resolveConfig({ root }, 'build', 'production')
+    if (!config?.preload) throw new Error(`Missing electron-vite preload configuration for ${app}`)
+    await build({ ...config.preload, root })
   }
 }

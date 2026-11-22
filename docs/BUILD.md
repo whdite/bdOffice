@@ -20,7 +20,7 @@ npm exec -- electron apps/shell
 
 `build:all` builds all six editor renderers, the Rust XLSX sidecar, the Office CLI and the Shell main and preload bundles. Rebuild the Shell after changing its main process or preload.
 
-After the initial build, `npm run dev` starts the renderer development servers and Shell. Workspace packages resolve locally through npm workspaces.
+After `npm ci`, `npm run dev` starts the desktop Shell and the renderer development servers. It compiles the Shell and any stale editor preloads locally. To open spreadsheets in a fresh checkout, build the XLSX engine once with `npm run native:build -w @genoffice/sheets`. Development runs use a separate `GenOffice Dev` profile by default. Workspace packages resolve locally through npm workspaces.
 
 ## Packages
 
