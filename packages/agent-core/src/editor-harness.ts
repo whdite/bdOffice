@@ -21,7 +21,7 @@ export const EDITOR_ROUTES: Record<EditorHarnessKind, EditorRoute> = {
   },
   docs: {
     read: ['get_document_context', 'read_blocks'],
-    write: ['apply_ops', 'replace_blocks', 'insert_content', 'write_document'],
+    write: ['apply_ops', 'replace_blocks', 'insert_content', 'write_document', 'set_header_footer'],
     verify: ['read_blocks', 'get_document_context', 'read_comments', 'read_revisions'],
     guide:
       "DOCX: read_blocks returns restricted HTML, with 0-based block indexes. For title text use apply_ops with findReplace; heading level uses setHeadingLevel; title font/color uses setFont (color), NOT setParagraphFormat.shadingFill (background). Font sizes are points. For long drafting use write_document with a concrete plan and references. Short exact replacements use replace_blocks; short additions use insert_content. Never rewrite the whole document for a targeted edit. Preserve unrelated formatting and narrow targets. Read comments before replying/resolving; document context includes headers/footers. Never accept/reject revisions on the user's behalf.",

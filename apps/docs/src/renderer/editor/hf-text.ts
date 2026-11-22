@@ -12,12 +12,15 @@ import {
   type HeaderFooter,
   type HfImage,
   type HfParagraph,
+  type ParaAlign,
   type Run,
 } from '@genoffice/docx-engine'
 
 export const PAGE_TOKEN = '{PAGE}'
 export const TOTAL_TOKEN = '{NUMPAGES}'
 export const SECTION_TOKEN = '{SECTIONPAGES}'
+
+export type HfAlignment = 'left' | 'center' | 'right'
 
 /** effective paragraphs: rich paras when present, else the legacy single line */
 export function hfParasOf(value: HeaderFooter, images?: HfImage[] | null): HfParagraph[] {
@@ -62,6 +65,29 @@ export function hfEditText(value: HeaderFooter): string {
     .replaceAll(PAGE_MARK, PAGE_TOKEN)
     .replaceAll(TOTAL_PAGES_MARK, TOTAL_TOKEN)
     .replaceAll(SECTION_PAGES_MARK, SECTION_TOKEN)
+}
+
+function isFlowText(para: HfParagraph): boolean {
+  return !para.cells && !para.boxAnchored && para.runs.some((run) => !run.del && run.text !== '')
+}
+
+/** Report alignment of the text paragraphs the editor can change. */
+export function hfTextAlignment(value: HeaderFooter | null): ParaAlign | 'mixed' | null {
+  const alignment = new Set(
+    value ? hfParasOf(value).filter(isFlowText).map((para) => para.align ?? 'left') : [],
+  )
+  return alignment.size > 1 ? 'mixed' : (alignment.values().next().value ?? null)
+}
+
+/** Change paragraph alignment without rebuilding fields or changing run formatting. */
+export function applyHfAlignment(value: HeaderFooter, align: HfAlignment): HeaderFooter | null {
+  const paras = hfParasOf(value)
+  if (!paras.some(isFlowText)) return null
+  const { keepContent: _keepContent, ...part } = value
+  return {
+    ...part,
+    paras: paras.map((para) => (isFlowText(para) ? { ...para, align } : para)),
+  }
 }
 
 /**

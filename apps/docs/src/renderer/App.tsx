@@ -125,7 +125,7 @@ import type { AiStyleInfo } from './ai/style-ops'
 import { applyResolvedPageSetup, describeSection, type AiPageSetupAccess } from './ai/page-setup'
 import { patchPendingSectPr, sectionIndexAtBlock } from './ai/pending-sections'
 import { protectedNoteMarkBlock, type AiNotesAccess } from './ai/note-ops'
-import { applyHfText, hfEditText } from './editor/hf-text'
+import { applyHfAlignment, applyHfText, hfEditText, hfTextAlignment } from './editor/hf-text'
 import {
   insertHfField,
   insertHfInstrField,
@@ -944,14 +944,13 @@ export function App() {
   const footerAreaView = areaView('footer')
 
   /** the AI header/footer tool edits the strip the matching edge area shows */
-  const commitHf = (kind: 'header' | 'footer', next: HeaderFooter, viewOverride?: HfView) => {
+  const commitHf = (kind: 'header' | 'footer', next: HeaderFooter, viewOverride?: HfView) =>
     commitHfAt(
       kind === 'header' ? 0 : lastSectionIdx,
       kind,
       viewOverride ?? (kind === 'header' ? headerAreaView : footerAreaView),
       next,
     )
-  }
   /** "Different first page" toggle (ribbon checkbox); page 1's header/footer become the first-page variant, as in Word */
   const toggleTitlePg = (on: boolean) => {
     hfEditorRef.current?.exit()
@@ -7746,25 +7745,29 @@ export function App() {
     () => ({
       read: () => {
         const ctx = aiHfCtxRef.current
-        const textOf = (kind: 'header' | 'footer', view: HfView) => {
+        const partOf = (kind: 'header' | 'footer', view: HfView) => {
           const value = ctx.valueOf(kind, view)
-          return value ? hfEditText(value) : ''
+          return { text: value ? hfEditText(value) : '', align: hfTextAlignment(value) }
         }
+        const pairOf = (view: HfView) => ({
+          header: partOf('header', view),
+          footer: partOf('footer', view),
+        })
         return {
-          header: textOf('header', 'default'),
-          footer: textOf('footer', 'default'),
-          headerFirst: ctx.titlePg ? textOf('header', 'first') : null,
-          footerFirst: ctx.titlePg ? textOf('footer', 'first') : null,
-          headerEven: ctx.evenOddHf ? textOf('header', 'even') : null,
-          footerEven: ctx.evenOddHf ? textOf('footer', 'even') : null,
-          titlePg: ctx.titlePg,
-          evenOddHf: ctx.evenOddHf,
+          default: pairOf('default'),
+          first: ctx.titlePg ? pairOf('first') : null,
+          even: ctx.evenOddHf ? pairOf('even') : null,
           multiSection: ctx.multiHf,
         }
       },
-      set: (kind, view, text) => {
+      set: (kind, view, { text, align }) => {
         const ctx = aiHfCtxRef.current
         if (ctx.locked) return 'the document is read-only; headers/footers cannot be edited'
+        const current = ctx.valueOf(kind, view)
+        const withText = text === undefined ? current : applyHfText(current, text)
+        const next = withText && align ? applyHfAlignment(withText, align) : withText
+        if (!next) return `the ${view} ${kind} has no editable text paragraphs to align`
+        if (!ctx.commit(kind, next, view)) return `the ${view} ${kind} could not be edited`
         if (view === 'first' && !ctx.titlePg) {
           setTitlePg(true)
           setTitlePgDirty(true)
@@ -7775,8 +7778,6 @@ export function App() {
           setEvenOddHfDirty(true)
           ctx.evenOddHf = true
         }
-        const next = applyHfText(ctx.valueOf(kind, view), text)
-        ctx.commit(kind, next, view)
         ctx.overlay.set(`${kind}:${view}`, next)
         return null
       },

@@ -6,6 +6,7 @@ import {
   TABLE_HEADER_FILL,
   type Block,
   type CommentInfo,
+  type ParaAlign,
   type TableCell,
   type TableModel,
 } from '@genoffice/docx-engine'
@@ -159,9 +160,9 @@ export const AGENT_SYSTEM_PROMPT = [
   '- insert_footnote / insert_endnote put a superscript reference mark into a block (after afterText, else at its end) and store the note text; read_notes lists notes with ids and anchored blocks; edit_note changes the text of one in place (findReplace inside the note, id kept); delete_note removes one with its mark. Notes are not document blocks — never reach them via block indexes or rewrite a block just to change its note.',
   '',
   '# Headers & footers',
-  '- The message context lists the current header/footer text. Change them with set_header_footer: plain text, \\n between lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields (e.g. text "{PAGE} / {NUMPAGES}" renders as "3 / 12"); an empty string clears the text.',
-  '- view "first" / "even" writes the different-first-page or even-page variant and switches the corresponding Word setting on automatically; omit view for the normal header/footer.',
-  '- Existing per-line alignment and styling are preserved; logos and images in the part are untouched. Headers/footers are not document blocks — never try to reach them via block indexes.',
+  '- The document context lists header/footer text and paragraph alignment. Use set_header_footer to change text or alignment. The {PAGE} and {NUMPAGES} tokens become live page-number fields. Omit text to change only alignment; an empty string clears the text.',
+  '- For outside page numbers, set the footer default variant to align:"right" and the even variant to align:"left". The "even" view turns on different odd/even pages; "first" turns on a different first page.',
+  '- Read get_document_context after changing a header/footer to check the requested alignment and page variants. Headers/footers are not document blocks.',
   '',
   '# Answer citations',
   '- When an answer draws on specific parts of the document, cite them as markdown links: [heading text or a short label](docnav://block/N), where N is a block index from the current block list. The user can click these to jump to the passage.',
@@ -605,38 +606,34 @@ export function serializeRangeToHtml(
 
 // ---- document context + layered request builders ----
 
-/** Header/footer snapshot for the AI context; texts use {PAGE}/{NUMPAGES} tokens, null = variant off */
+interface AiHfPart {
+  text: string
+  align: ParaAlign | 'mixed' | null
+}
+
+type AiHfPair = Record<'header' | 'footer', AiHfPart>
+
+/** Text uses {PAGE} / {NUMPAGES} tokens. A null variant is switched off. */
 export interface AiHfState {
-  header: string
-  footer: string
-  headerFirst: string | null
-  footerFirst: string | null
-  headerEven: string | null
-  footerEven: string | null
-  titlePg: boolean
-  evenOddHf: boolean
+  default: AiHfPair
+  first: AiHfPair | null
+  even: AiHfPair | null
   multiSection: boolean
 }
 
 function hfContextLines(hf: AiHfState): string[] {
-  const fmt = (v: string) => (v ? `"${clip(v.replace(/\n/g, '\\n'), 160)}"` : '(empty)')
+  const fmt = ({ text, align }: AiHfPart) =>
+    `${text ? `"${clip(text.replace(/\n/g, '\\n'), 160)}"` : '(empty)'}${align ? ` [alignment: ${align}]` : ''}`
+  const pair = ({ header, footer }: AiHfPair) => `header ${fmt(header)} | footer ${fmt(footer)}`
   const lines = [
     'Headers & footers ({PAGE}/{NUMPAGES} are live page-number fields; change with set_header_footer):',
-    `- header: ${fmt(hf.header)} | footer: ${fmt(hf.footer)}`,
+    `- default${hf.even ? ' (odd pages)' : ''}: ${pair(hf.default)}`,
   ]
-  if (hf.titlePg) {
-    lines.push(
-      `- first-page variant: header ${fmt(hf.headerFirst ?? '')} | footer ${fmt(hf.footerFirst ?? '')}`,
-    )
-  }
-  if (hf.evenOddHf) {
-    lines.push(
-      `- even-page variant: header ${fmt(hf.headerEven ?? '')} | footer ${fmt(hf.footerEven ?? '')}`,
-    )
-  }
+  if (hf.first) lines.push(`- first-page variant: ${pair(hf.first)}`)
+  if (hf.even) lines.push(`- even-page variant: ${pair(hf.even)}`)
   if (hf.multiSection) {
     lines.push(
-      '- the document has multiple sections; header/footer edits apply to the first section (later sections inherit unless they define their own)',
+      '- the document has multiple sections; this tool targets the first section header and the last section footer, following Link to Previous',
     )
   }
   return lines

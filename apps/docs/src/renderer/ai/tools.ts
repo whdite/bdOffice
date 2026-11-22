@@ -11,6 +11,7 @@ import { executeOps, opNames } from './ops'
 import { clipExcerpt, repliesOf, resolveCommentAnchor } from './comment-ops'
 import { redactTextBetween } from './redact-view'
 import { insertPictureAtSelection } from '../editor/insert-picture'
+import type { HfAlignment } from '../editor/hf-text'
 import {
   PAGE_SETUP_TOOL,
   SECTION_BREAK_TOOL,
@@ -616,23 +617,28 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'set_header_footer',
     description:
-      'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
-      'Per-line alignment/styling of the existing header/footer is preserved; images in it are untouched. view "first"/"even" writes the different-first-page / even-page variant (enabling that setting if needed).',
+      'Set page header/footer text or paragraph alignment. Plain text uses \\n between lines; {PAGE} and {NUMPAGES} become live fields. Omit text to preserve existing text and fields. ' +
+      'For outside footer page numbers, use align "right" on view "default" and align "left" on view "even". Writing "even" or "first" enables the corresponding variant.',
     inputSchema: {
       type: 'object',
       properties: {
         kind: { type: 'string', enum: ['header', 'footer'] },
         text: {
           type: 'string',
-          description: 'new text; \\n between lines; may contain {PAGE} / {NUMPAGES}; "" clears',
+          description: 'optional new text; \\n between lines; {PAGE} / {NUMPAGES} are fields; "" clears',
+        },
+        align: {
+          type: 'string',
+          enum: ['left', 'center', 'right'],
+          description: 'optional alignment of ordinary text paragraphs; omitted preserves alignment',
         },
         view: {
           type: 'string',
           enum: ['default', 'first', 'even'],
-          description: 'which variant to write (default when omitted)',
+          description: 'default (odd pages if odd/even are different), first page, or even pages',
         },
       },
-      required: ['kind', 'text'],
+      required: ['kind'],
     },
   },
   PAGE_SETUP_TOOL,
@@ -676,7 +682,11 @@ export const AGENT_TOOLS: AgentToolDef[] = [
 export interface AiHeaderFooterAccess {
   read(): AiHfState
   /** returns an error message, or null on success */
-  set(kind: 'header' | 'footer', view: 'default' | 'first' | 'even', text: string): string | null
+  set(
+    kind: 'header' | 'footer',
+    view: 'default' | 'first' | 'even',
+    update: { text?: string; align?: HfAlignment },
+  ): string | null
 }
 
 /**
@@ -1994,18 +2004,28 @@ function executeSyncTool(
       if (view !== 'default' && view !== 'first' && view !== 'even') {
         return fail(summaryOf(), 'view must be "default", "first" or "even"')
       }
-      if (typeof call.input.text !== 'string') return fail(summaryOf(), 'text must be a string')
-      // a doubly escaped newline arrives as the two characters backslash-n; a footer must not show it literally
-      const text = call.input.text.includes('\n')
-        ? call.input.text
-        : call.input.text.replace(/\\n/g, '\n')
-      if (text.length > 2000) {
+      const { text: inputText, align } = call.input
+      if (inputText !== undefined && typeof inputText !== 'string')
+        return fail(summaryOf(), 'text must be a string')
+      if (align !== undefined && align !== 'left' && align !== 'center' && align !== 'right')
+        return fail(summaryOf(), 'align must be "left", "center" or "right"')
+      if (inputText === undefined && align === undefined)
+        return fail(summaryOf(), 'provide text, align, or both')
+      // A doubly escaped newline should not show up literally in the footer.
+      const text = inputText?.includes('\n') ? inputText : inputText?.replace(/\\n/g, '\n')
+      if (text !== undefined && text.length > 2000) {
         return fail(summaryOf(), 'text is too long for a header/footer (2000 characters max)')
       }
-      const error = hf.set(kind, view, text)
+      const error = hf.set(kind, view, {
+        ...(text !== undefined ? { text } : {}),
+        ...(align !== undefined ? { align } : {}),
+      })
       if (error) return fail(summaryOf(), error)
+      const actual = hf.read()[view]?.[kind].align
+      if (align !== undefined && actual !== align)
+        return fail(summaryOf(), `Could not verify ${view} ${kind} alignment as ${align}.`)
       return {
-        output: `Updated the ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}.`,
+        output: `Updated the ${view} ${kind}.${actual ? ` Read-back alignment: ${actual}.` : ''}`,
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
       }

@@ -1097,10 +1097,12 @@ export async function saveDocx(
     }
   }
   const hfParts: Array<{ path: string; xml: string }> = []
-  const hfRefTags: string[] = []
+  type HfReferenceEdit = { tag: string; replaces?: string }
+  const hfRefEdits: HfReferenceEdit[] = []
   const hfOverrides: string[] = []
-  /** header-part rels rewritten for a picture watermark (path -> xml) */
+  /** header/footer relationships to write (path -> xml) */
   const hfRelsOut = new Map<string, string>()
+  const hfRelsPath = (path: string) => path.replace(/(^|\/)([^/]+)$/, '$1_rels/$2.rels')
   // the page box the watermark is fitted to must be the one this save writes
   const savedSectPr = options.section
     ? applySectionSettings(options.trailingSectPr ?? trailingSectPr, options.section)
@@ -1176,7 +1178,7 @@ export async function saveDocx(
   const resolveHfNewPictures = async (partPath: string, xml: string, hf: HeaderFooter) => {
     const pictures = hf.newPictures
     if (!pictures || !xml.includes(NEW_PICTURE_TOKEN_PREFIX)) return xml
-    const relsPath = partPath.replace(/^word\/([^/]+)$/, 'word/_rels/$1.rels')
+    const relsPath = hfRelsPath(partPath)
     let relsXml =
       hfRelsOut.get(relsPath) ??
       (await zip.file(relsPath)?.async('string')) ??
@@ -1195,7 +1197,7 @@ export async function saveDocx(
             rId = nextFreeRelId(relsXml)
             relsXml = relsXml.replace(
               '</Relationships>',
-              `<Relationship Id="${rId}" Type="${IMAGE_REL_TYPE}" Target="${landMedia(picture).replace(/^word\//, '')}"/></Relationships>`,
+              `<Relationship Id="${rId}" Type="${IMAGE_REL_TYPE}" Target="/${landMedia(picture)}"/></Relationships>`,
             )
             rIds.set(token, rId)
           }
@@ -1226,13 +1228,18 @@ export async function saveDocx(
     if (base && (hf.pictureOnly || hf.keepContent)) return base
     return headerFooterPartXml(kind, hf, undefined, base, options.pageCount)
   }
+  const hfTargetOf = (tag: string): string | undefined => {
+    const id = hfReferenceRId(tag)
+    return id ? relTargets.get(id) : undefined
+  }
   const planHeaderFooter = async (
+    sectPr: string,
     kind: 'header' | 'footer',
     hf: HeaderFooter | undefined,
     hfType: 'default' | 'first' | 'even' = 'default',
-  ) => {
+  ): Promise<HfReferenceEdit | undefined> => {
     if (hf === undefined) return
-    const refs = hfReferenceTags(trailingSectPr, kind)
+    const refs = hfReferenceTags(sectPr, kind)
     // non-schema w:type="odd" and untyped references count as default (mirrors parse)
     const existing =
       refs.find((r) => hfReferenceType(r) === hfType) ??
@@ -1240,49 +1247,73 @@ export async function saveDocx(
         ? (refs.find((r) => hfReferenceType(r) === 'odd') ??
           refs.find((r) => hfReferenceType(r) === undefined))
         : undefined)
-    const rId = existing ? hfReferenceRId(existing) : undefined
-    const target = rId ? relTargets.get(rId) : undefined
-    if (target) {
-      const path = resolveRelationshipTargetPath(docPath, target)
-      if (!path) return
-      const file = zip.file(path)
-      const originalXml = hfOriginalXml(hf, file ? await file.async('string') : null)
-      const partXml = await resolveHfNewPictures(path, editedHfPartXml(kind, hf, originalXml), hf)
-      hfParts.push({ path, xml: partXml })
-    } else {
-      let n = 1
-      while (
-        zip.file(`word/${kind}${n}.xml`) ||
-        hfParts.some((p) => p.path === `word/${kind}${n}.xml`)
-      )
-        n++
-      const filename = `${kind}${n}.xml`
-      const partXml = await resolveHfNewPictures(
-        `word/${filename}`,
-        headerFooterPartXml(kind, hf, undefined, null, options.pageCount),
-        hf,
-      )
-      const newRId = `rId${nextRelNum++}`
-      newRels.push({ rId: newRId, type: HF_REL_TYPE[kind], target: filename, external: false })
-      hfParts.push({ path: `word/${filename}`, xml: partXml })
-      hfRefTags.push(`<w:${kind}Reference w:type="${hfType}" r:id="${newRId}"/>`)
-      hfOverrides.push(
-        `<Override PartName="/word/${filename}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`,
-      )
+    const target = existing ? hfTargetOf(existing) : undefined
+    const path = target ? resolveRelationshipTargetPath(docPath, target) : null
+    if (target && !path) return
+    const previousXml = path ? await zip.file(path)?.async('string') : null
+    const xml = editedHfPartXml(kind, hf, hfOriginalXml(hf, previousXml ?? null))
+    // Odd and even footer references can point to the same part. Keep a private
+    // copy for the edited variant so the other variant keeps its own formatting.
+    const sharedFooter =
+      kind === 'footer' &&
+      path &&
+      refs.some((ref) => {
+        if (ref === existing) return false
+        const otherTarget = hfTargetOf(ref)
+        return otherTarget && resolveRelationshipTargetPath(docPath, otherTarget) === path
+      })
+    if (path && !sharedFooter) {
+      hfParts.push({ path, xml: await resolveHfNewPictures(path, xml, hf) })
+      return
     }
+    // Relative relationships inside a copied footer still resolve beside the source part.
+    const folder = path ? path.slice(0, path.lastIndexOf('/') + 1) : 'word/'
+    let n = 1
+    let newPath = `${folder}${kind}${n}.xml`
+    while (zip.file(newPath) || hfParts.some((part) => part.path === newPath)) {
+      n++
+      newPath = `${folder}${kind}${n}.xml`
+    }
+    if (path) {
+      const rels = await zip.file(hfRelsPath(path))?.async('string')
+      if (rels !== undefined) hfRelsOut.set(hfRelsPath(newPath), rels)
+    }
+    hfParts.push({ path: newPath, xml: await resolveHfNewPictures(newPath, xml, hf) })
+    const id = `rId${nextRelNum++}`
+    const partName = `/${newPath.split('/').map(encodeURIComponent).join('/')}`
+    const docFolder = docPath.slice(0, docPath.lastIndexOf('/') + 1)
+    const relTarget = folder === docFolder ? partName.slice(partName.lastIndexOf('/') + 1) : partName
+    newRels.push({ rId: id, type: HF_REL_TYPE[kind], target: relTarget, external: false })
+    hfOverrides.push(
+      `<Override PartName="${partName}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`,
+    )
+    return { tag: `<w:${kind}Reference w:type="${hfType}" r:id="${id}"/>`, replaces: existing }
   }
   // Header text edits keep each part's own watermark. Apply a pending watermark
   // separately, after all section references and text edits have landed.
-  await planHeaderFooter('header', options.header)
-  await planHeaderFooter('footer', options.footer)
-  await planHeaderFooter('header', options.headerFirst, 'first')
-  await planHeaderFooter('footer', options.footerFirst, 'first')
-  await planHeaderFooter('header', options.headerEven, 'even')
-  await planHeaderFooter('footer', options.footerEven, 'even')
+  for (const [kind, hf, variant] of [
+    ['header', options.header, 'default'],
+    ['footer', options.footer, 'default'],
+    ['header', options.headerFirst, 'first'],
+    ['footer', options.footerFirst, 'first'],
+    ['header', options.headerEven, 'even'],
+    ['footer', options.footerEven, 'even'],
+  ] as const) {
+    const ref = await planHeaderFooter(trailingSectPr, kind, hf, variant)
+    if (ref) hfRefEdits.push(ref)
+  }
 
-  // ---- Per-section header/footer (non-last sections): with a reference, rewrite the
-  // part; without one, create a part + inject the reference ----
-  const sectionRefTags = new Map<number, string[]>()
+  const updateHfReferences = (xml: string, edits: HfReferenceEdit[]): string => {
+    const additions: string[] = []
+    for (const { tag, replaces } of edits) {
+      if (replaces) xml = xml.replace(replaces, tag)
+      else additions.push(tag)
+    }
+    return additions.length > 0 ? injectIntoSectPr(xml, additions.join('')) : xml
+  }
+
+  // Header/footer references in the non-final sections.
+  const sectionRefEdits = new Map<number, HfReferenceEdit[]>()
   const unlinkSectionHf = (xml: string, docxIndex: number): string => {
     let out = xml
     for (const u of options.sectionHfUnlink ?? []) {
@@ -1295,52 +1326,11 @@ export async function saveDocx(
     const block = parsed.blocks.find((b) => b.docxIndex === edit.lastBlockIndex)
     const sectPr =
       block?.originalXml?.match(/<w:sectPr[^>]*\/>|<w:sectPr[\s\S]*?<\/w:sectPr>/)?.[0] ?? ''
-    const refs = hfReferenceTags(sectPr, edit.kind)
-    const variant = edit.variant ?? 'default'
-    // non-schema w:type="odd" and untyped references count as default (mirrors parse)
-    const existing =
-      refs.find((r) => hfReferenceType(r) === variant) ??
-      (variant === 'default'
-        ? (refs.find((r) => hfReferenceType(r) === 'odd') ??
-          refs.find((r) => hfReferenceType(r) === undefined))
-        : undefined)
-    const rId = existing ? hfReferenceRId(existing) : undefined
-    const target = rId ? relTargets.get(rId) : undefined
-    if (target) {
-      const path = resolveRelationshipTargetPath(docPath, target)
-      if (!path) continue
-      const file = zip.file(path)
-      const originalXml = hfOriginalXml(edit.hf, file ? await file.async('string') : null)
-      hfParts.push({
-        path,
-        xml: await resolveHfNewPictures(
-          path,
-          editedHfPartXml(edit.kind, edit.hf, originalXml),
-          edit.hf,
-        ),
-      })
-    } else {
-      let n = 1
-      while (
-        zip.file(`word/${edit.kind}${n}.xml`) ||
-        hfParts.some((p) => p.path === `word/${edit.kind}${n}.xml`)
-      )
-        n++
-      const filename = `${edit.kind}${n}.xml`
-      const partXml = await resolveHfNewPictures(
-        `word/${filename}`,
-        headerFooterPartXml(edit.kind, edit.hf, undefined, null, options.pageCount),
-        edit.hf,
-      )
-      const newRId = `rId${nextRelNum++}`
-      newRels.push({ rId: newRId, type: HF_REL_TYPE[edit.kind], target: filename, external: false })
-      hfParts.push({ path: `word/${filename}`, xml: partXml })
-      hfOverrides.push(
-        `<Override PartName="/word/${filename}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${edit.kind}+xml"/>`,
-      )
-      const tags = sectionRefTags.get(edit.lastBlockIndex) ?? []
-      tags.push(`<w:${edit.kind}Reference w:type="${variant}" r:id="${newRId}"/>`)
-      sectionRefTags.set(edit.lastBlockIndex, tags)
+    const ref = await planHeaderFooter(sectPr, edit.kind, edit.hf, edit.variant)
+    if (ref) {
+      const edits = sectionRefEdits.get(edit.lastBlockIndex) ?? []
+      edits.push(ref)
+      sectionRefEdits.set(edit.lastBlockIndex, edits)
     }
   }
 
@@ -1837,12 +1827,8 @@ export async function saveDocx(
       xml = embedImage(fb.image)
     }
     xml = resolveNewPictures(xml)
-    // Inject newly created per-section header/footer references into the section's sectPr
-    // (the reference must be the first sectPr child)
-    const refTags = fbDocxIndex !== undefined ? sectionRefTags.get(fbDocxIndex) : undefined
-    if (refTags && refTags.length > 0) {
-      xml = injectIntoSectPr(xml, refTags.join(''))
-    }
+    const refEdits = fbDocxIndex !== undefined ? sectionRefEdits.get(fbDocxIndex) : undefined
+    if (refEdits) xml = updateHfReferences(xml, refEdits)
     if (fbDocxIndex !== undefined) xml = unlinkSectionHf(xml, fbDocxIndex)
     // The ink list is authoritative: old aidocs-ink runs go away, the desired
     // set is re-injected at its (possibly new) anchor paragraphs.
@@ -1905,10 +1891,7 @@ export async function saveDocx(
         if (options.pgNumType)
           xml = applyPageNumType(xml, options.pgNumType.fmt, options.pgNumType.start)
         if (options.titlePg !== undefined) xml = applyTitlePg(xml, options.titlePg)
-        // headerReference/footerReference must be the first sectPr children
-        if (hfRefTags.length > 0) {
-          xml = injectIntoSectPr(xml, hfRefTags.join(''))
-        }
+        xml = updateHfReferences(xml, hfRefEdits)
         xml = unlinkSectionHf(xml, block.docxIndex)
       }
       const index = block.docxIndex
@@ -1929,10 +1912,11 @@ export async function saveDocx(
   // every ref-less body sectPr picks up the new header/footer references
   // (the trailing sectPr already received them above and is skipped by the
   // lookahead; sections that carry their own references keep them)
-  if (options.hfAllSections && hfRefTags.length > 0) {
+  const newHfRefTags = hfRefEdits.filter((ref) => !ref.replaces).map((ref) => ref.tag)
+  if (options.hfAllSections && newHfRefTags.length > 0) {
     newDocumentXml = newDocumentXml.replace(
       /(<w:sectPr(?:\s[^>]*)?>)(?!<w:headerReference|<w:footerReference)/g,
-      `$1${hfRefTags.join('')}`,
+      `$1${newHfRefTags.join('')}`,
     )
   }
 
@@ -2550,24 +2534,18 @@ function headerFooterPartXml(
   const root = kind === 'header' ? 'w:hdr' : 'w:ftr'
   const textRun = (t: string) =>
     t ? `<w:r><w:t xml:space="preserve">${escapeXmlText(t)}</w:t></w:r>` : ''
-  const pageField =
-    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-    '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    '<w:r><w:t>1</w:t></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
-  const numPagesField =
-    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-    '<w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    `<w:r><w:t>${Math.max(1, Math.round(pageCount))}</w:t></w:r>` +
-    '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
-  const sectionPagesField =
-    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
-    '<w:r><w:instrText xml:space="preserve"> SECTIONPAGES </w:instrText></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    '<w:r><w:t>1</w:t></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+  const pageCountText = String(Math.max(1, Math.round(pageCount)))
+  const numberField = (instruction: 'PAGE' | 'NUMPAGES' | 'SECTIONPAGES', source?: Run) => {
+    const value = instruction === 'NUMPAGES' ? pageCountText : '1'
+    const result = source ? inlineRunsXml([{ ...source, text: value }]) : textRun(value)
+    return (
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      `<w:r><w:instrText xml:space="preserve"> ${instruction} </w:instrText></w:r>` +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      result +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+  }
   const totalMarksRe = new RegExp(`([${TOTAL_PAGES_MARK}${SECTION_PAGES_MARK}])`)
   let content: string
   /** edited layout-table cells of the n-th top-level w:tbl (in part order), to patch into its bytes */
@@ -2596,19 +2574,19 @@ function headerFooterPartXml(
           // SECTIONPAGES and NUMPAGES split alike: a mark between two segments is its field
           run.text.split(totalMarksRe).forEach((seg, k) => {
             if (k % 2 === 1) {
-              runs += seg === SECTION_PAGES_MARK ? sectionPagesField : numPagesField
+              runs += numberField(seg === SECTION_PAGES_MARK ? 'SECTIONPAGES' : 'NUMPAGES', run)
               return
             }
             if (seg.includes(PAGE_MARK)) {
               seg.split(PAGE_MARK).forEach((piece, j) => {
-                if (j > 0) runs += pageField
+                if (j > 0) runs += numberField('PAGE', run)
                 if (piece) runs += inlineRunsXml([{ ...run, text: piece }])
               })
             } else if (!pageEmitted && seg.includes('#')) {
               const [before, ...rest] = seg.split('#')
               runs +=
                 inlineRunsXml(before ? [{ ...run, text: before }] : []) +
-                pageField +
+                numberField('PAGE', run) +
                 inlineRunsXml(rest.join('#') ? [{ ...run, text: rest.join('#') }] : [])
               pageEmitted = true
             } else if (seg) {
@@ -2641,7 +2619,8 @@ function headerFooterPartXml(
         return `<w:p>${pPr}${hfRunsXml(para.runs)}</w:p>`
       })
       .join('')
-    if (!pageEmitted) content += `<w:p><w:pPr><w:jc w:val="center"/></w:pPr>${pageField}</w:p>`
+    if (!pageEmitted)
+      content += `<w:p><w:pPr><w:jc w:val="center"/></w:pPr>${numberField('PAGE')}</w:p>`
     const paras = hf.paras
     cellPatches = (tblIndex) => {
       const grid: Array<Array<CellParaPatch[] | null> | null> = []
@@ -2663,6 +2642,9 @@ function headerFooterPartXml(
       return grid.length > 0 ? grid : null
     }
   } else {
+    const pageField = numberField('PAGE')
+    const numPagesField = numberField('NUMPAGES')
+    const sectionPagesField = numberField('SECTIONPAGES')
     const textWithTotal = (t: string) =>
       t
         .split(SECTION_PAGES_MARK)
