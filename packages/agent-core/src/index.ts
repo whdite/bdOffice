@@ -78,6 +78,7 @@ export type {
   ToolExecutedEvent,
 } from './loop'
 export { createIpcTransport, IPC_STREAM_SILENCE_TIMEOUT_MS } from './electron-transport'
+export { hasExplicitOfficeFormatting } from './office-formatting'
 export type {
   IpcStreamChunk,
   IpcStreamStart,

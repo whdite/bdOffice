@@ -24,6 +24,7 @@ import { formatRangeAggregate, type RangeAggregate } from './aggregate'
 import { guideCatalogSummary, loadGuides } from './guides'
 import { modelCellValueAt, NO_REDACTIONS, type RedactionIndex } from './redact'
 import { redactGuardForOps } from './redact-guard'
+import { defaultTableOperations } from './draft-table'
 
 /**
  * The workbook DSL as an AgentSkill tool set: read-only context/reader tools
@@ -204,6 +205,10 @@ export type CreateDocumentToolOutcome =
 
 export interface SheetsSkillDeps {
   getActiveSheetInfo(): ActiveSheetInfo
+  defaultTableStyle?: {
+    instruction(): string
+    isPristineSheet(sheetId: string): boolean
+  }
   /** Ensure a lazy workbook range is present in Univer before reading it. */
   ensureRangeLoaded?(range: RangeBounds, sheetId?: string): boolean | Promise<boolean>
   /** cell values/formulas; reads the active sheet unless sheetId targets another */
@@ -1363,7 +1368,26 @@ export function executeWorkbookTool(
           `Rejected — none of the ${operations.length} operation(s) were applied (a batch is all-or-nothing): ${refusal.reason}`,
         )
       }
-      const outcome = deps.proposeOperations(operations, summaryInput.trim())
+      const style = deps.defaultTableStyle
+      const defaults = style
+        ? defaultTableOperations(operations, style.instruction(), style.isPristineSheet)
+        : []
+      const usableDefaults =
+        defaults.length > 0 &&
+        operations.length + defaults.length <= 1000 &&
+        !redactGuardForOps(
+          defaults,
+          deps.redactions?.() ?? NO_REDACTIONS,
+          (sheetId) => deps.getActiveSheetInfo().sheets.find((sheet) => sheet.id === sheetId)?.name,
+          (sheetName) =>
+            deps.getActiveSheetInfo().sheets.find((sheet) => sheet.name === sheetName)?.id,
+        )
+      let outcome = deps.proposeOperations(
+        usableDefaults ? [...operations, ...defaults] : operations,
+        summaryInput.trim(),
+      )
+      if (!outcome.ok && usableDefaults)
+        outcome = deps.proposeOperations(operations, summaryInput.trim())
       if (!outcome.ok) {
         return fail(
           t('aiToolPropose'),

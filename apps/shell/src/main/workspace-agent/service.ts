@@ -102,6 +102,9 @@ import { webSearch, searchOptionsFromSettings } from '@genoffice/ai-search'
 import { parseFileToText, pdfPagesToText } from '@genoffice/file-parse'
 import {
   buildBlankDocx,
+  draftBodyRole,
+  draftParagraphAppearance,
+  isNoticeDraft,
   parseDocx,
   saveDocx,
   type GeneratedBlock,
@@ -139,16 +142,24 @@ import { normalizePdfAnnotation } from '../../../../pdf/src/renderer/workspace-a
 import { applySaveRequest, extractPagesBytes } from '../../../../pdf/src/main/save-pdf'
 import { listPageImages, renderImagePng } from '../../../../pdf/src/main/image-edit'
 import type { SavePdfRequest } from '../../../../pdf/src/shared/ipc'
-import { buildPagePptx, parsePageSpec, type PageSpec } from '@genoffice/pipelines/slides'
+import {
+  buildPagePptx,
+  draftSlideTheme,
+  parsePageSpec,
+  renderDraftSlide,
+  type PageSpec,
+} from '@genoffice/pipelines/slides'
 import {
   applyCellEditsToXlsx,
   readBasicWorkbook,
   type SheetFormulaValues,
+  type SheetStructuralOps,
   type CellEdit,
 } from '@genoffice/xlsx-gateway/gateway/xlsx-gateway'
 import { saveWorkbookViaSidecar } from '@genoffice/xlsx-gateway/gateway/xlsx-package-io'
 import { XlsxSidecarClient } from '../../../../sheets/src/main/xlsx-sidecar-client'
 import { blankXlsxBuffer } from '@genoffice/xlsx-gateway/gateway/csv-import'
+import { draftTableLayout } from '@genoffice/xlsx-gateway/domain/draft-table'
 import type { CellState } from '@genoffice/xlsx-gateway/domain/workbook.types'
 import type {
   AgentApprovalMode,
@@ -1988,12 +1999,27 @@ async function fetchPageImage(url: string): Promise<{ bytes: Uint8Array; ext: st
 async function createPptxBytes(
   input: Record<string, unknown>,
 ): Promise<{ bytes: Uint8Array; warnings: string[] }> {
-  const rawPages = pageSpecInputs(input)
+  const supplied = pageSpecInputs(input)
+  const draftPages =
+    supplied.length === 0 && Array.isArray(input.draftSlides) ? input.draftSlides : []
+  const rawPages = draftPages.length > 0 ? draftPages : supplied
   if (rawPages.length === 0) return { bytes: await createBlankPptx(), warnings: [] }
   if (rawPages.length > MAX_PPTX_CREATE_SLIDES) {
     throw new Error(`PPTX creation is limited to ${MAX_PPTX_CREATE_SLIDES} slides per operation.`)
   }
-  const parsedPages = rawPages.map(pageSpecFromInput)
+  const theme =
+    input.theme === 'classroom' || input.theme === 'report'
+      ? input.theme
+      : draftSlideTheme(JSON.stringify(draftPages))
+  const parsedPages = rawPages.map((raw, index) => {
+    if (draftPages.length === 0) return pageSpecFromInput(raw)
+    const spec = renderDraftSlide(raw, theme)
+    if (!spec)
+      throw new Error(
+        `Slide ${index + 1} does not fit its draft layout. Use the required section count, shorten its text, or provide a positioned slide spec.`,
+      )
+    return { spec, warnings: [] }
+  })
   const warnings = parsedPages.flatMap(({ warnings: pageWarnings }, index) =>
     pageWarnings.map((warning) => `Slide ${index + 1}: ${warning}`),
   )
@@ -2014,6 +2040,51 @@ async function createPptxBytes(
 async function createDocxBytes(input: Record<string, unknown>): Promise<Uint8Array> {
   const bytes = await buildBlankDocx()
   const text = stringInput(input, 'text', stringInput(input, 'content'))
+  const title = stringInput(input, 'title').trim()
+  if (Array.isArray(input.paragraphs)) {
+    const paragraphs = input.paragraphs
+    const notice = isNoticeDraft(title, '')
+    const blocks: GeneratedBlock[] = []
+    if (title) {
+      const { format, run } = draftParagraphAppearance(notice, 'title')
+      blocks.push({ type: 'paragraph', styleId: 'Title', format, runs: [{ text: title, ...run }] })
+    }
+    for (const [index, item] of paragraphs.entries()) {
+      if (
+        !item ||
+        typeof item !== 'object' ||
+        typeof item.text !== 'string' ||
+        (item.role !== undefined &&
+          item.role !== 'heading' &&
+          item.role !== 'subheading' &&
+          item.role !== 'body')
+      )
+        throw new Error(`Invalid DOCX paragraph at index ${index}.`)
+      const heading = item.role === 'heading' || item.role === 'subheading'
+      const role = heading
+        ? (item.role as 'heading' | 'subheading')
+        : draftBodyRole(notice, item.text.trim(), {
+            opensBody: index === 0,
+            closesBody: index === paragraphs.length - 1,
+            nextText:
+              index === paragraphs.length - 2
+                ? String(paragraphs[index + 1]?.text ?? '')
+                : undefined,
+          })
+      const { format, run } = draftParagraphAppearance(notice, role)
+      blocks.push({
+        type: heading ? 'heading' : 'paragraph',
+        ...(heading ? { level: role === 'heading' ? 2 : 3 } : {}),
+        format,
+        runs: [{ text: item.text, ...run }],
+      })
+    }
+    if (blocks.length === 0) return bytes
+    return saveDocx(
+      await parseDocx(bytes),
+      blocks.map((block) => ({ kind: 'generated' as const, block })),
+    )
+  }
   if (!text) return bytes
   const parsed = await parseDocx(bytes)
   const target = parsed.blocks.find(isEditableDocxBlock)
@@ -2033,7 +2104,59 @@ async function createXlsxBytes(input: Record<string, unknown>): Promise<Uint8Arr
   ) {
     throw new Error('The worksheet name must be 1-31 characters and cannot contain \\/:*?[].')
   }
-  return new Uint8Array(await blankXlsxBuffer(sheet))
+  const blank = await blankXlsxBuffer(sheet)
+  if (input.rows === undefined) return new Uint8Array(blank)
+  const rows = input.rows
+  if (
+    !Array.isArray(rows) ||
+    rows.length === 0 ||
+    rows.length > 200 ||
+    !rows.every(
+      (row) =>
+        Array.isArray(row) &&
+        row.length > 0 &&
+        row.length <= 24 &&
+        row.every(
+          (value) =>
+            value === null ||
+            typeof value === 'boolean' ||
+            typeof value === 'string' ||
+            (typeof value === 'number' && Number.isFinite(value)),
+        ),
+    ) ||
+    rows.reduce((total, row) => total + row.length, 0) > 2000
+  )
+    throw new Error('Expected rows of cell values (up to 200 rows, 24 columns and 2,000 cells).')
+  const layout = draftTableLayout(rows)
+  const edits: CellEdit[] = rows.flatMap((values: CellState['value'][], row) => {
+    const style = layout?.rowStyles[row]
+    return values.map((value, column) => ({
+      sheetName: sheet,
+      row,
+      column,
+      writeValue: true,
+      cell:
+        typeof value === 'string' && value.startsWith('=')
+          ? { value: null, formula: value }
+          : { value },
+      style: layout && row < layout.headerRow && column !== 0 ? undefined : style,
+    }))
+  })
+  const sizing: SheetStructuralOps[] = layout
+    ? [
+        {
+          sheetName: sheet,
+          ops: layout.widths.map((pixels, column) => ({
+            kind: 'set-col-size',
+            start: column,
+            end: column,
+            // Fresh files use the default Calibri 11 maximum digit width (7px).
+            size: Math.round((pixels / 7) * 256) / 256,
+          })),
+        },
+      ]
+    : []
+  return new Uint8Array((await applyCellEditsToXlsx(blank, edits, sizing)).buffer)
 }
 
 function blockText(block: { runs?: Run[]; previewText?: string }): string {
@@ -4179,8 +4302,24 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
   }),
   toolDef(
     'docx.create',
-    'Create a new DOCX through the BigDogOffice document engine. Use a new output path and optionally provide initial text.',
-    { path: { type: 'string' }, text: { type: 'string' }, content: { type: 'string' } },
+    'Create a new DOCX at a new path. For a complete draft without a requested template or format, pass a title and paragraphs in reading order so the document engine can typeset them. Use text or content for plain initial text.',
+    {
+      path: { type: 'string' },
+      title: { type: 'string' },
+      paragraphs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            role: { type: 'string', enum: ['heading', 'subheading', 'body'] },
+            text: { type: 'string' },
+          },
+          required: ['text'],
+        },
+      },
+      text: { type: 'string' },
+      content: { type: 'string' },
+    },
   ),
   toolDef('docx.inspect', 'Inspect a DOCX outline and block skeleton.', {
     path: { type: 'string' },
@@ -4304,12 +4443,12 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
   }),
   toolDef(
     'pptx.create',
-    'Create a new PPTX using structured page specs on a 1280x720 pixel canvas. Every element MUST include numeric x,y,w,h and type. Text uses paragraphs:[{runs:[{text:"Title",color:"#000000",sizePt:32}]}]. Follow the user\'s colors and content exactly. Use a new output path.',
+    'Create a new PPTX at a new path. For ordinary presentations, use draftSlides with editable text, and theme classroom for lessons or report for reports. Vary layouts with the content. For specified visuals, colors, placements, charts or templates, use slides with positioned elements on a 1280x720 pixel canvas. Every positioned element needs numeric x,y,w,h and type.',
     SLIDE_CREATE_FIELDS,
   ),
   toolDef(
     'pptx.create_deck',
-    'Create a new PPTX deck through the Slides generation pipeline. Use a new output path and provide optional slides/page specs.',
+    'Create a new PPTX deck at a new path. Prefer draftSlides and a theme for regular classroom or report decks. Use positioned slides when the user specifies a style or needs precise visuals.',
     SLIDE_CREATE_FIELDS,
   ),
   toolDef('pptx.render', 'Validate and summarize a PPTX slide for a render/review step.', {
@@ -4338,8 +4477,21 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
   toolDef('xlsx.list_sheets', 'List worksheet names in a workbook.', { path: { type: 'string' } }),
   toolDef(
     'xlsx.create',
-    'Create a new blank XLSX through the BigDogOffice spreadsheet backend. Use a new output path and optionally provide a sheet name.',
-    { path: { type: 'string' }, sheet: { type: 'string' }, sheetName: { type: 'string' } },
+    'Create a new XLSX at a new path. Pass rows with a header followed by data for a small ordinary table with default styling (up to 2,000 cells). Use formulas beginning with =. To make a blank workbook, or to apply custom formatting, omit rows and use spreadsheet edit tools.',
+    {
+      path: { type: 'string' },
+      sheet: { type: 'string' },
+      sheetName: { type: 'string' },
+      rows: {
+        type: 'array',
+        maxItems: 200,
+        items: {
+          type: 'array',
+          maxItems: 24,
+          items: { type: ['string', 'number', 'boolean', 'null'] },
+        },
+      },
+    },
   ),
   toolDef(
     'xlsx.read',

@@ -1,5 +1,6 @@
 // Renderer code imports './layout-audit' by its own subpath: this entry pulls in pptx-engine (Node only).
 export * from './page-spec'
+export * from './draft-layout'
 export * from './deck-spec'
 export * from './audit-deck'
 export * from './layout-audit'

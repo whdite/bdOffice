@@ -586,6 +586,7 @@ export function AiPanel({
   const runSnapshotRef = useRef<PmNode | null>(null)
   /** last sent instruction, for one-click retry */
   const lastInstructionRef = useRef('')
+  const docDraftInstructionRef = useRef('')
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full
       transcript persistence, and so persisting needn't do side effects inside a setState updater */
   const runToolsRef = useRef<
@@ -830,7 +831,7 @@ export function AiPanel({
             write: (spec, onProgress, signal) => runDocWriterRef.current(spec, onProgress, signal),
           }),
           () => pageSetupAccessRef.current,
-          () => docExtrasRef.current,
+          () => ({ ...docExtrasRef.current, draftInstruction: docDraftInstructionRef.current }),
           () => notesAccessRef.current,
           () => mediaAnalysisAvailable(settingsRef.current, false),
         ),
@@ -1142,6 +1143,10 @@ export function AiPanel({
     if (scope) setInactiveSelectionShown(editor, true)
     instructionRef.current = instruction
     lastInstructionRef.current = instruction
+    docDraftInstructionRef.current =
+      sentSkills.length > 0 || sentAtts.some(({ path }) => /\.(?:docx?|dotx?|dotm)$/i.test(path))
+        ? ''
+        : instruction
     runToolsRef.current = []
     runSnapshotRef.current = null
     runUsageRef.current = undefined

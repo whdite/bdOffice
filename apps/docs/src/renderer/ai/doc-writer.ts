@@ -21,6 +21,7 @@ export interface DocWriteSpec {
   plan: string
   title?: string | undefined
   context?: string | undefined
+  useDraftAppearance?: boolean | undefined
   /** the user's own request, verbatim */
   instruction: string
 }
@@ -66,9 +67,12 @@ export function buildDocWriterRequest(
   const instruction = spec.instruction.trim()
     ? `\n\n## The user's request\n${spec.instruction.slice(0, 2000)}`
     : ''
+  const structure = spec.useDraftAppearance
+    ? '\n\nFor this complete draft, put the document title (if appropriate) in the first <h1>. Use <h2> and <h3> for actual sections and <p> for prose.'
+    : ''
   return {
     system: WRITER_SYSTEM + langDirective,
-    user: `## Plan\n${spec.title ? `Title: ${spec.title}\n` : ''}${spec.plan.slice(0, 6000)}${context}${instruction}\n\nWrite the content now.`,
+    user: `## Plan\n${spec.title ? `Title: ${spec.title}\n` : ''}${spec.plan.slice(0, 6000)}${context}${instruction}${structure}\n\nWrite the content now.`,
   }
 }
 
@@ -121,6 +125,7 @@ export class DraftLanding {
     private readonly editor: Editor,
     private readonly numIds: NumIds,
     position: WritePosition,
+    private readonly formatNodes?: (nodes: ReturnType<typeof parseHtmlFragment>) => ReturnType<typeof parseHtmlFragment>,
   ) {
     assertNoDocumentDraft(editor)
     setDocumentDraft(editor, true)
@@ -202,7 +207,9 @@ export class DraftLanding {
     this.pending = null
     let next: ProseMirrorNode[]
     try {
-      next = parseHtmlFragment(html, this.numIds).map((n) =>
+      const nodes = parseHtmlFragment(html, this.numIds)
+      const formatted = this.formatNodes?.(nodes) ?? nodes
+      next = formatted.map((n) =>
         this.editor.schema.nodeFromJSON({ ...n, attrs: { ...n.attrs, aiChanged: false } }),
       )
     } catch {

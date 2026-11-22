@@ -84,13 +84,22 @@ function emuRect(op: Op, field = 'box'): EmuRect {
 register({
   name: 'setTransform',
   validate(op, ctx) {
-    emuRect(op, op.group && op.absBox !== undefined ? 'absBox' : 'box')
+    const box = emuRect(op, op.group && op.absBox !== undefined ? 'absBox' : 'box')
     if (op.group) {
       const { index, slide } = resolveSlide(ctx, op)
       resolveGroup(op, index, slide.elements)
       return
     }
-    resolveElement(ctx, op, { allowPart: true })
+    const { el } = resolveElement(ctx, op, { allowPart: true })
+    if (
+      (box.cx < 9525 || box.cy < 9525) &&
+      (el.type === 'text' || el.type === 'shape') &&
+      el.text?.paragraphs.some((paragraph) => paragraph.runs.some((run) => run.text.trim()))
+    ) {
+      throw new GuidedError(
+        'op "setTransform": a nonempty text box must be at least 9525 EMU (1 px) wide and high. Pass lengths with a px suffix (e.g. "250px") when working in pixels.',
+      )
+    }
   },
   apply(op, ctx): OpRecord {
     const rotDeg = typeof op.rotDeg === 'number' ? op.rotDeg : 0

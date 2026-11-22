@@ -11,6 +11,7 @@ import { executeOps, opNames } from './ops'
 import { clipExcerpt, repliesOf, resolveCommentAnchor } from './comment-ops'
 import { redactTextBetween } from './redact-view'
 import { insertPictureAtSelection } from '../editor/insert-picture'
+import { formatDraft, shouldFormatDraft } from './draft-format'
 import {
   PAGE_SETUP_TOOL,
   SECTION_BREAK_TOOL,
@@ -686,6 +687,7 @@ export interface AiHeaderFooterAccess {
  */
 /** Document-level stores beyond the PM doc (styles.xml, the page watermark), handed to the tool executor. */
 export interface AiDocExtras {
+  draftInstruction?: string
   styles?: AiStyleAccess
   watermark?: AiWatermarkAccess
   /** protection (read-only or enforced tracked changes) forbids accepting / rejecting revisions */
@@ -1279,7 +1281,7 @@ export function executeTool(
     return executeAsyncTool(editor, call, signal)
   }
   if (call.name === 'write_document')
-    return writeDocument(editor, call, numIds, track, signal, writer)
+    return writeDocument(editor, call, numIds, track, signal, writer, extras?.draftInstruction)
   if (call.name === 'set_watermark' && typeof call.input.image === 'string')
     return setPictureWatermark(call, signal, extras)
   return settle(
@@ -1294,6 +1296,7 @@ async function writeDocument(
   track: AiTrack | undefined,
   signal: AbortSignal | undefined,
   writer: AiDocWriter | undefined,
+  draftInstruction: string | undefined,
 ): Promise<ToolExecution> {
   const summary = t('aiSumWriteDocument')
   const plan = String(call.input.plan ?? '').trim()
@@ -1315,7 +1318,12 @@ async function writeDocument(
     )
   }
   const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v))
-  const draft = new DraftLanding(editor, numIds, position)
+  const useDraftAppearance = position.kind === 'whole' && shouldFormatDraft(editor, draftInstruction)
+  const applyDefaultAppearance =
+    useDraftAppearance && draftInstruction
+      ? (nodes: ReturnType<typeof parseHtmlFragment>) => formatDraft(nodes, draftInstruction)
+      : undefined
+  const draft = new DraftLanding(editor, numIds, position, applyDefaultAppearance)
   let result: DocWriteResult
   let rendered: string | null
   try {
@@ -1325,6 +1333,7 @@ async function writeDocument(
         title: str(call.input.title),
         context: str(call.input.context),
         instruction: '',
+        useDraftAppearance,
       },
       (html) => draft.update(html),
       signal,
@@ -1365,6 +1374,8 @@ async function writeDocument(
     position.kind === 'whole' &&
     (isBlankDocument(editor) || call.input.replaceDocument === true)
   ) {
+    if (applyDefaultAppearance && shouldFormatDraft(editor, draftInstruction))
+      nodes = applyDefaultAppearance(nodes)
     replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes, track)
   } else {
     insertBlocksAfter(editor, draft.indexBefore(), nodes, track)
@@ -1476,6 +1487,9 @@ function executeSyncTool(
         return fail(t('aiSumInsertContent'), 'html did not parse into any content blocks')
       const count = editor.state.doc.childCount
       if (isBlankDocument(editor)) {
+        const instruction = extras?.draftInstruction
+        if (instruction && shouldFormatDraft(editor, instruction))
+          nodes = formatDraft(nodes, instruction)
         // the blank template's single empty paragraph gets replaced
         replaceBlockRange(editor, 0, count - 1, nodes, track)
         return {

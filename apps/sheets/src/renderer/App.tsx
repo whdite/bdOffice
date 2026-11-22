@@ -905,6 +905,7 @@ export function App({
   /// the skill's getActiveSheetInfo reads mid-run; the state is what the chip
   /// renders from, so both are written together by setAiRunScope.
   const aiRunScopeRef = useRef<FrozenSelection | null | undefined>(undefined)
+  const tableDraftInstructionRef = useRef('')
   const [aiRunScope, setAiRunScopeState] = useState<FrozenSelection | null | undefined>(undefined)
   /// `sheetId!A1` of the scope currently on the chip; the refresh compares
   /// against it so an unchanged selection never resets the dismissed flag.
@@ -1872,6 +1873,7 @@ export function App({
     if (!instruction.trim() || !loop || loop.busy || runStartingRef.current) return
     runStartingRef.current = true
     const generation = ++runGenerationRef.current
+    tableDraftInstructionRef.current = sentSkills.length ? '' : instruction
     const current = () => agentMountedRef.current && generation === runGenerationRef.current
     // Freeze the selection scope for the whole run: users go on clicking around
     // while the AI works, so a live read would retarget "this column" mid-run.
@@ -2200,6 +2202,40 @@ export function App({
   function sheetsSkillDeps(): SheetsSkillDeps {
     return {
       getActiveSheetInfo,
+      defaultTableStyle: {
+        instruction: () => tableDraftInstructionRef.current,
+        isPristineSheet: (sheetId) => {
+          const worksheet = univerRef.current?.univerAPI
+            .getActiveWorkbook()
+            ?.getSheetBySheetId(sheetId)
+          if (!worksheet || worksheet.getMergedRanges().length > 0) return false
+          const state = lazyWorkbookRef.current
+          const source = state && lazySheetMeta(state, sheetId)
+          if (
+            source &&
+            (source.storedCellCount !== 0 ||
+              source.columnWidths.length > 0 ||
+              source.defaultRowHeightFixed ||
+              source.defaultColumnWidth != null)
+          )
+            return false
+          const sheet = worksheet.getSheet()
+          const snapshot = sheet.getSnapshot()
+          if (
+            Object.keys(snapshot.rowData ?? {}).length ||
+            Object.keys(snapshot.columnData ?? {}).length
+          )
+            return false
+          let pristine = true
+          sheet.getCellMatrix().forValue((_row, _column, cell) => {
+            if (cell && (cell.v != null || cell.f || cell.s || cell.p)) {
+              pristine = false
+              return false
+            }
+          })
+          return pristine
+        },
+      },
       aggregateRange: (sheetId, bounds) => aggregateWorkbookRange(readContext(), sheetId, bounds),
       ensureRangeLoaded: async (range, sheetId) => {
         const state = lazyWorkbookRef.current

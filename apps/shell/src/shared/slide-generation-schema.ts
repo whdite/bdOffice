@@ -62,6 +62,33 @@ export const SLIDE_PAGE_SCHEMA = {
 }
 export const SLIDE_CREATE_FIELDS = {
   path: { type: 'string' },
+  draftSlides: {
+    type: 'array',
+    minItems: 1,
+    maxItems: 50,
+    items: {
+      type: 'object',
+      properties: {
+        layout: {
+          type: 'string',
+          enum: ['cover', 'explain', 'compare', 'steps', 'practice', 'summary'],
+          description:
+            'Compare uses exactly two sections, steps uses two to four, and cover uses zero to two.',
+        },
+        title: { type: 'string' },
+        sections: {
+          type: 'array',
+          maxItems: 4,
+          items: {
+            type: 'object',
+            properties: { heading: { type: 'string' }, text: { type: 'string' } },
+          },
+        },
+      },
+      required: ['layout', 'title', 'sections'],
+    },
+  },
+  theme: { type: 'string', enum: ['classroom', 'report'] },
   slides: { type: 'array', minItems: 1, items: SLIDE_PAGE_SCHEMA },
   pages: { type: 'array', minItems: 1, items: SLIDE_PAGE_SCHEMA },
   spec: SLIDE_PAGE_SCHEMA,

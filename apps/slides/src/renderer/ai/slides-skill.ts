@@ -1,4 +1,8 @@
-import type { AgentSkill, ToolDisplay } from '@genoffice/agent-core'
+import {
+  hasExplicitOfficeFormatting,
+  type AgentSkill,
+  type ToolDisplay,
+} from '@genoffice/agent-core'
 import type {
   GroupRenderNode,
   PictureRenderNode,
@@ -9,6 +13,11 @@ import type {
 import type { AgentToolCall, AgentToolDef } from '../../shared/ipc'
 import { OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '@genoffice/pptx-ops/op-docs'
 import { auditSlideLayout, formatAudit } from '@genoffice/pipelines/slides/layout-audit'
+import {
+  draftSlideStyleGuide,
+  draftSlideTheme,
+  type DraftSlideTheme,
+} from '@genoffice/pipelines/slides/draft-layout'
 import { runLayoutScript, type LayoutScriptElement } from './layout-script'
 import {
   extractLayoutSkeleton,
@@ -84,6 +93,7 @@ export type DeckProgressEvent =
 
 /** Panel/skill access point to the currently open deck (refs provided by App, stay fresh across renders). */
 export interface DeckAccess {
+  draftInstruction?(): string
   /** Host-owned restriction for automatic post-generation QC, never model input. */
   layoutOnly?: boolean
   getSlides(): RenderSlide[]
@@ -153,6 +163,7 @@ export interface DeckAccess {
     canvasH: number
     /** Formatted template-chrome block (layout-skeleton.ts) for this page's role; absent without a template */
     skeleton?: string
+    draftTheme?: DraftSlideTheme
     signal?: AbortSignal
   }): Promise<{ ok: boolean; marker?: string; error?: string; imageFailures?: string[] }>
   /**
@@ -1861,6 +1872,16 @@ async function executeTool(
       const pageContext =
         context && context.length > PAGE_CONTEXT_MAX ? context.slice(0, PAGE_CONTEXT_MAX) : context
       const styleTemplateName = String(call.input.style_template ?? '').trim() || undefined
+      const instruction = access.draftInstruction?.() ?? ''
+      const draftTheme =
+        insertMode === 'replace' &&
+        !styleTemplateName &&
+        instruction &&
+        !hasExplicitOfficeFormatting(instruction) &&
+        slides.length <= 1 &&
+        slides.every((slide) => slide.nodes.every((node) => node.decoration))
+          ? draftSlideTheme(`${instruction}\n${topic}`)
+          : undefined
 
       // Figure-provenance gate: a data-dense request must say where its numbers came from
       {
@@ -1879,7 +1900,7 @@ async function executeTool(
       // Prefer the user-passed style as the style preference; without pages, generate a full Style Skill from topic.
       // When full pages+style are passed, respect the user's style (don't regenerate).
       // When style_template is passed, load the template directly and skip Step 0 (no LLM style generation).
-      let styleSkill = ''
+      let styleSkill = draftTheme ? draftSlideStyleGuide(draftTheme) : ''
       let templateSkeleton: LayoutSkeleton | undefined
       if (styleTemplateName && access.loadStyleTemplate) {
         // Preferred: load from a saved template (fail-open: on load failure continue normal generation)
@@ -2224,6 +2245,7 @@ async function executeTool(
           canvasW,
           canvasH,
           ...(skeleton ? { skeleton } : {}),
+          ...(draftTheme ? { draftTheme } : {}),
           ...(signal ? { signal } : {}),
         }
         const res = await tryGenerate(pageArgs, pageIndex)

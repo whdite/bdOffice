@@ -21,6 +21,7 @@ import {
   type ToolDisplay,
 } from '@genoffice/agent-core'
 import type { RenderSlide } from '@genoffice/pptx-render'
+import { renderDraftSlide } from '@genoffice/pipelines/slides/draft-layout'
 import { imageGenerationAvailable } from '@genoffice/ai-provider/browser'
 import type { AiSettings, AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
@@ -449,6 +450,7 @@ export function AiPanel({
 
   const instructionRef = useRef('')
   const lastInstructionRef = useRef('')
+  const deckDraftInstructionRef = useRef('')
   /** Paired with lastInstructionRef: keeps the bubble showing only the user's request on retries */
   const lastDisplayTextRef = useRef<string | undefined>(undefined)
   /** Mirror of the last turn's (the final reply's turn) tool activity — used when persisting the assistant message,
@@ -846,6 +848,7 @@ export function AiPanel({
     }
 
     const access: DeckAccess = {
+      draftInstruction: () => deckDraftInstructionRef.current,
       getSlides: () => slidesRef.current,
       getCurrent: () => currentRef.current,
       // A queue run names its targets explicitly; whatever is selected on the
@@ -956,6 +959,43 @@ export function AiPanel({
       generatePageLocal: async (args) => {
         const W = args.canvasW
         const H = args.canvasH
+        if (args.draftTheme && !args.signal?.aborted) {
+          const system = [
+            'Write the final on-slide text for one presentation page. Output one JSON object.',
+            'Schema: {"layout":"cover|explain|compare|steps|practice|summary|photo","title":"...","sections":[{"heading":"optional","text":"..."}],"image":"only for photo"}',
+            'Cover: 0–2 short subtitles or lines of credit. Explain and summary: 1–4 sections. Compare: exactly 2 parallel sections. Steps: 2–4 stages in order. Practice: task first, then up to 3 short instructions. Photo: 1–2 sections and a relevant URL from Available images.',
+            'Use the language and concrete content of the brief. Use whole short sentences and fit the content to one projected slide. Preserve names, numbers, questions and examples from the brief or reference. Omit decorative labels and do not invent factual details.',
+            'For a required chart, table, diagram, specific visual placement or text too long to fit in any of these layouts, return {"layout":"custom"}.',
+          ].join('\n')
+          const user = [
+            `Page ${args.pageIndex}/${args.totalPages} in ${args.topic || args.coreHook}`,
+            `Title: ${args.title}`,
+            `Layout suggestion: ${args.layout}`,
+            `Brief: ${args.brief}`,
+            args.context ? `Reference: ${args.context.slice(0, 4000)}` : '',
+            args.images.length ? `Available images: ${args.images.join('\n')}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+          const response = await runLlmOnce(system, user, undefined, true, args.signal, 4000)
+          if (response.ok && response.text && !args.signal?.aborted) {
+            try {
+              const spec = renderDraftSlide(
+                JSON.parse(extractJsonObject(response.text)),
+                args.draftTheme,
+                args.images,
+              )
+              if (spec) {
+                const result = await window.slidesApi.localGeneratePage({
+                  specJson: JSON.stringify(spec),
+                })
+                if (result?.ok && result.marker) return result
+              }
+            } catch {
+              // Detailed briefs and unparseable responses use the full page designer below.
+            }
+          }
+        }
         const sys =
           'You are a professional slide visual designer. Output exactly ONE JSON object describing one slide; no explanations/markdown/code fences.\n' +
           '\n' +
@@ -1593,6 +1633,11 @@ export function AiPanel({
     // skills ride with this one message only: the chips clear like attachments do
     const sentSkills = opts?.attachSkills ? attachedSkillsRef.current : []
     if (sentSkills.length > 0) setAttachedSkills([])
+    deckDraftInstructionRef.current =
+      sentSkills.length > 0 ||
+      sentAtts.some(({ path }) => /\.(?:pptx?|potx?|styleskill\.json)$/i.test(path))
+        ? ''
+        : instruction
     inputEditedSinceRunRef.current = false
     instructionRef.current = instruction
     lastInstructionRef.current = instruction
@@ -1708,6 +1753,7 @@ export function AiPanel({
       const current = () => mountedRef.current && generation === runGenerationRef.current
       instructionRef.current = instruction
       lastInstructionRef.current = instruction
+      deckDraftInstructionRef.current = ''
       lastDisplayTextRef.current = undefined
       lastTurnToolsRef.current = []
       runToolsRef.current = []
