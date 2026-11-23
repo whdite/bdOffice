@@ -805,6 +805,9 @@ const environmentApi: EnvironmentApi = {
 contextBridge.exposeInMainWorld('aiOfficeEnvironment', environmentApi)
 const remoteAdminApi: RemoteAdminApi = {
   status: () => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.status),
+  save: (input) => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.save, input),
+  start: (input) => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.start, input),
+  stop: () => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.stop),
   invite: () => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.invite),
   saveQr: () => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.saveQr),
   revoke: (id) => ipcRenderer.invoke(REMOTE_ADMIN_CHANNELS.revoke, id),

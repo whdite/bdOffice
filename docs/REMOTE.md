@@ -1,5 +1,13 @@
 # Self-hosted Remote
 
+## Phone collaboration in BigDogOffice
+
+Open **Settings → Phone collaboration**. For Wi-Fi or cellular pairing, connect the desktop to a Remote service at an HTTPS address reachable from both devices. Complete desktop authorization before generating a pairing invitation.
+
+Save **Start Remote with BigDog** to connect on the next launch. Automatic path selection tries direct LAN or P2P, TURN when available, and encrypted WebSocket relay. Choose **Server relay** to use the relay directly. The desktop shows the route selected by the connected phone.
+
+The built-in development service listens on loopback at port 48300. Use an emulator or a device with an ADB reverse port forward for this mode.
+
 Remote is a single-account coordination service for your own devices. It supplies authentication, signaling, relay, short-lived TURN credentials, encrypted offline delivery and execution ownership. Desktop model credentials and filesystem authority remain on the host.
 
 ## Local start

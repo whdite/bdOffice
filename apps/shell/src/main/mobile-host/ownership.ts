@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import type { HostServerApi } from '@bigdogoffice/remote-core/host'
 interface RecordEntry {
   globalId: string
+  origin?: string
   epoch?: number
   state: 'active' | 'frozen' | 'transferred'
 }
@@ -12,11 +13,27 @@ export class RemoteOwnership {
   private deadlines = new Map<string, number>()
   private api?: HostServerApi
   private pending = new Map<string, Promise<void>>()
-  constructor(private readonly path: string) {
+  constructor(
+    private readonly path: string,
+    private readonly previousOrigin?: string,
+  ) {
     this.records = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
   }
   configure(api: HostServerApi) {
+    if (this.previousOrigin) {
+      const legacy = Object.values(this.records).filter((record) => !record.origin)
+      for (const record of legacy) record.origin = this.previousOrigin
+      if (legacy.length) this.save()
+    }
     this.api = api
+    this.deadlines.clear()
+    this.pending.clear()
+  }
+  disconnect(api: HostServerApi) {
+    if (this.api !== api) return
+    this.api = undefined
+    this.deadlines.clear()
+    this.pending.clear()
   }
   private save() {
     mkdirSync(dirname(this.path), { recursive: true })
@@ -30,11 +47,16 @@ export class RemoteOwnership {
     )
   }
   async ensure(id: string) {
-    if (!this.api) return
-    if (this.records[id]?.state === 'transferred' || this.records[id]?.state === 'frozen')
+    const api = this.api
+    if (!api) return
+    const existing = this.records[id]
+    if (
+      existing &&
+      (existing.state !== 'active' || (existing.origin && existing.origin !== api.baseUrl))
+    )
       throw new Error('OWNER_CHANGED')
     if (!this.records[id]) {
-      this.records[id] = { globalId: id, state: 'active' }
+      this.records[id] = { globalId: id, state: 'active', origin: api.baseUrl }
       this.save()
     }
     if ((this.deadlines.get(id) ?? 0) > performance.now() + 3000) return
@@ -42,16 +64,20 @@ export class RemoteOwnership {
     const started = performance.now(),
       record = this.records[id]
     const promise = (async () => {
-      const lease = await this.api!.courier('lease', {
+      const lease = await api.courier('lease', {
         sessionId: record.globalId,
         ...(record.epoch ? { epoch: record.epoch } : {}),
       })
-      if (this.records[id] !== record || record.state !== 'active') throw new Error('OWNER_CHANGED')
+      if (this.api !== api || this.records[id] !== record || record.state !== 'active')
+        throw new Error('OWNER_CHANGED')
+      record.origin = api.baseUrl
       record.epoch = lease.epoch
       this.save()
       this.deadlines.set(id, started + 10_000)
       if (!this.allowed(id)) throw new Error('LEASE_EXPIRED')
-    })().finally(() => this.pending.delete(id))
+    })().finally(() => {
+      if (this.pending.get(id) === promise) this.pending.delete(id)
+    })
     this.pending.set(id, promise)
     return promise
   }
@@ -74,7 +100,7 @@ export class RemoteOwnership {
     }
   }
   stage(localId: string, globalId: string, epoch: number) {
-    this.records[localId] = { globalId, epoch, state: 'frozen' }
+    this.records[localId] = { globalId, epoch, state: 'frozen', origin: this.api?.baseUrl }
     this.save()
   }
   activate(localId: string) {

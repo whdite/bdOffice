@@ -38,6 +38,7 @@ export class HostServerApi {
     url: string,
     readonly storage: SecureSettings,
     readonly role: 'host' | 'client',
+    private readonly signal?: AbortSignal,
   ) {
     const parsed = new URL(url)
     if (
@@ -59,10 +60,11 @@ export class HostServerApi {
     return `remote-tokens:${this.baseUrl}:${this.role}:${this.identity?.deviceId}`
   }
   private async request(path: string, init: RequestInit = {}, token?: string): Promise<unknown> {
+    const deadline = init.signal ?? AbortSignal.timeout(15_000)
     const response = await fetch(this.baseUrl + path, {
       ...init,
       redirect: 'error',
-      signal: init.signal ?? AbortSignal.timeout(15_000),
+      signal: this.signal ? AbortSignal.any([deadline, this.signal]) : deadline,
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -182,6 +184,16 @@ export class HostServerApi {
   }
   async devices() {
     return this.authenticatedRequest('/api/v1/devices')
+  }
+  async verifyCurrentDevice(identity: HostIdentity) {
+    await this.authenticate(identity)
+    const device = (await this.authenticatedRequest('/api/v1/me')) as AuthorizedPeerDevice
+    if (
+      device.deviceId !== identity.deviceId ||
+      device.identityKey !== identity.publicKey ||
+      device.role !== this.role
+    )
+      throw new ServerApiError('AUTH_INVALID', 'Remote device authorization changed.', false, 401)
   }
   async createPairing() {
     return this.authenticatedRequest('/api/v1/pairing/create', {

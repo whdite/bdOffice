@@ -1518,6 +1518,17 @@
 .set-remote-device {
   overflow-wrap: anywhere;
 }
+.set-remote-form {
+  display: grid;
+  gap: 8px;
+  margin-block: 12px;
+  padding-block-end: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.set-remote-form .set-input {
+  width: min(62%, 350px);
+  min-width: 0;
+}
 .set-remote-device {
   flex: 1;
 }

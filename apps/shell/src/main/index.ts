@@ -6,15 +6,13 @@ import {
 } from './workspace-locations'
 import { getProjectStore, saveAiSettings } from '../../../docs/src/main/docs-main'
 import { ConnectionSetupService } from './connection-setup'
-import { MobileDevHost } from './mobile-host/server'
-import { RemoteIdentityStore } from './mobile-host/identity-store'
-import { connectDesktopRemote, readRemoteConfig } from './mobile-host/remote'
+import { DesktopRemoteService } from './mobile-host/desktop-service'
+import { connectDesktopRemote, readPreviousRemoteOrigin } from './mobile-host/remote'
 import { createMobilePreview } from './mobile-host/preview'
 import { RemoteOwnership } from './mobile-host/ownership'
 import { registerRemoteAdmin } from './mobile-host/admin-ipc'
 import { createMobileHostDependencies } from './mobile-host/adapter'
 import { submitAssistantMessage } from './mobile-host/submit'
-import { MOBILE_HOST_DEFAULT_PORT } from '../shared/mobile-host-api'
 import { registerConnectionSetupIpc } from './connection-setup-ipc'
 import { LocalFileAccessPolicy, insidePath } from './document-context/file-access-policy'
 import { DocumentContextService, type DocumentContextSource } from './document-context/service'
@@ -3870,12 +3868,63 @@ function getRuntimeProviderManager(): RuntimeProviderManager {
 let environmentService: EnvironmentService | null = null
 let maintenanceTaskStore: TaskStore | null = null
 let assistantTaskService: AssistantTaskService | null = null
-let mobileDevHost: MobileDevHost | null = null
-let remoteHostConnection: Awaited<ReturnType<typeof connectDesktopRemote>> | null = null
+let mobileRemote: DesktopRemoteService | null = null
 let remoteOwnership: RemoteOwnership | null = null
 function mobileOwnership() {
   return (remoteOwnership ??= new RemoteOwnership(
     join(app.getPath('userData'), 'mobile', 'ownership.json'),
+    readPreviousRemoteOrigin(app.getPath('userData')),
+  ))
+}
+function getMobileRemote() {
+  const userData = app.getPath('userData')
+  return (mobileRemote ??= new DesktopRemoteService(
+    userData,
+    () =>
+      createMobileHostDependencies({
+        preview: createMobilePreview(userData, app.isPackaged ? process.execPath : undefined),
+        authorizeWrite: (id) => mobileOwnership().ensure(id),
+        transfer: async (method, params) => {
+          const handoff = mobileRemote?.mounted?.remote?.handoff
+          if (!handoff) throw new Error('REMOTE_REQUIRED')
+          if (method === 'handoff.prepare')
+            return handoff.prepare(
+              String(params.sessionId),
+              String(params.target),
+              String(params.requestId),
+            )
+          if (method === 'handoff.read')
+            return handoff.read(
+              String(params.sessionId),
+              String(params.ticket),
+              Number(params.offset),
+            )
+          if (method === 'handoff.finalize') return handoff.finalize(String(params.ticket))
+          if (method === 'handoff.upload')
+            return handoff.upload(
+              params.manifest as Parameters<typeof handoff.upload>[0],
+              Number(params.offset),
+              String(params.base64),
+            )
+          if (method === 'handoff.accept') return handoff.accept(params.manifest as Parameters<typeof handoff.accept>[0])
+          throw new Error('METHOD_NOT_SUPPORTED')
+        },
+        store: sessionStoreFor(userData),
+        sessions: sessionManagement.service,
+        runtime: getWorkspaceAgentRuntime,
+        tasks: getAssistantTaskService,
+      }),
+    (config, port, gateway, options) =>
+      connectDesktopRemote(
+        config,
+        userData,
+        port,
+        gateway,
+        getAssistantTaskService(),
+        mobileOwnership(),
+        options.local ? [] : sessionStoreFor(userData).list({ state: 'active' }).map((session) => session.id),
+        options,
+      ),
   ))
 }
 function getTaskStore(): TaskStore {
@@ -8383,13 +8432,7 @@ const connectionSetupService = new ConnectionSetupService({
 registerConnectionSetupIpc(connectionSetupService, () => shellWindow?.webContents)
 registerRemoteAdmin({
   contents: () => shellWindow?.webContents,
-  host: () => mobileDevHost,
-  remote: () => remoteHostConnection,
-  status: () => ({
-    online: remoteHostConnection?.host.isOnline() ?? false,
-    serverUrl: remoteHostConnection?.api.baseUrl,
-    name: remoteHostConnection?.identity.name,
-  }),
+  service: getMobileRemote,
 })
 let environmentDelegation: Promise<{ sessionId: string }> | null = null
 registerComputerUseIpc({ contents: () => shellWindow?.webContents, service: getComputerUseService })
@@ -8427,8 +8470,6 @@ registerEnvironmentIpc({
 })
 app.once('will-quit', () => {
   void computerUseService?.stop()
-  void mobileDevHost?.close()
-  void remoteHostConnection?.stop()
   assistantTaskService?.close()
   maintenanceTaskStore?.close()
 })
@@ -8754,81 +8795,15 @@ app.whenReady().then(async () => {
   })
   installUiScale()
   sessionManagement.start()
-  if (process.env.BIGDOG_MOBILE_DEV === '1' || process.env.BIGDOG_REMOTE_CONFIG) {
-    try {
-      const remoteConfig = process.env.BIGDOG_REMOTE_CONFIG
-        ? readRemoteConfig(process.env.BIGDOG_REMOTE_CONFIG)
-        : undefined
-      const port = Number(process.env.BIGDOG_MOBILE_PORT ?? MOBILE_HOST_DEFAULT_PORT)
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port')
-      mobileDevHost = new MobileDevHost(
-        createMobileHostDependencies({
-          preview: createMobilePreview(
-            app.getPath('userData'),
-            app.isPackaged ? process.execPath : undefined,
-          ),
-          authorizeWrite: (id) => mobileOwnership().ensure(id),
-          transfer: async (method, params) => {
-            const handoff = remoteHostConnection?.handoff
-            if (!handoff) throw new Error('REMOTE_REQUIRED')
-            if (method === 'handoff.prepare')
-              return handoff.prepare(
-                String(params.sessionId),
-                String(params.target),
-                String(params.requestId),
-              )
-            if (method === 'handoff.read')
-              return handoff.read(
-                String(params.sessionId),
-                String(params.ticket),
-                Number(params.offset),
-              )
-            if (method === 'handoff.finalize') return handoff.finalize(String(params.ticket))
-            if (method === 'handoff.upload')
-              return handoff.upload(
-                params.manifest as Parameters<typeof handoff.upload>[0],
-                Number(params.offset),
-                String(params.base64),
-              )
-            if (method === 'handoff.accept')
-              return handoff.accept(params.manifest as Parameters<typeof handoff.accept>[0])
-            throw new Error('METHOD_NOT_SUPPORTED')
-          },
-          store: sessionStoreFor(app.getPath('userData')),
-          sessions: sessionManagement.service,
-          runtime: getWorkspaceAgentRuntime,
-          tasks: getAssistantTaskService,
-        }),
-        remoteConfig?.pairingCode ?? process.env.BIGDOG_MOBILE_PAIRING_CODE ?? '',
-        Date.now,
-        new RemoteIdentityStore(join(app.getPath('userData'), 'mobile', 'identity.sqlite')),
-      )
-      await mobileDevHost.start(port)
-      if (remoteConfig)
-        remoteHostConnection = await connectDesktopRemote(
-          remoteConfig,
-          app.getPath('userData'),
-          port,
-          mobileDevHost,
-          getAssistantTaskService(),
-          mobileOwnership(),
-          sessionStoreFor(app.getPath('userData'))
-            .list({ state: 'active' })
-            .map((session) => session.id),
-        )
-      console.info('[mobile-dev] Loopback gateway ready on port', port)
-    } catch {
-      void mobileDevHost?.close()
-      mobileDevHost = null
-      console.error('[mobile-dev] Gateway unavailable; check the opt-in pairing code and port.')
-    }
-  }
-  try {
-    getAssistantTaskService().start()
-  } catch {
-    /* Keep the existing profile intact if the task ledger is unavailable. */
-  }
   createShellWindow()
+  void getMobileRemote().startOnLaunch().then(() => {
+    if (runtimeShutdownStarted) return
+    try {
+      getAssistantTaskService().start()
+    } catch {
+      /* Keep the existing profile intact if the task ledger is unavailable. */
+    }
+  })
   // deferred to ready: labels need currentLang(), which reads app.getLocale()
   installBackToHomeItems()
   installDockMenu()
@@ -8915,11 +8890,13 @@ app.on('will-quit', (event) => {
   stopSheetsSidecar()
   for (const entry of [...workspaceFilesSubscriptions.values()])
     removeWorkspaceFilesSubscription(entry.sender, entry.workspaceId)
-  if (runtimeProviderManager && !runtimeShutdownStarted) {
+  if ((runtimeProviderManager || mobileRemote) && !runtimeShutdownStarted) {
     runtimeShutdownStarted = true
     event.preventDefault()
     // Resume after Electron has unwound the prevented will-quit event.
-    void runtimeProviderManager.dispose().finally(() => setImmediate(() => app.quit()))
+    void Promise.allSettled([runtimeProviderManager?.dispose(), mobileRemote?.dispose()]).then(() =>
+      setImmediate(() => app.quit()),
+    )
   }
   // release the MCP port synchronously (macOS keeps the process alive after
   // the last window closes, so window-all-closed is not enough)
