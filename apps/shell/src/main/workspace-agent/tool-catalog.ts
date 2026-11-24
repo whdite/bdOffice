@@ -1,4 +1,10 @@
-import type { AgentToolDef } from '@genoffice/agent-core'
+import {
+  editorToolCapability,
+  isObservation,
+  type AgentToolDef,
+  type AgentToolCall,
+  type ToolCapability,
+} from '@genoffice/agent-core'
 import type { AgentApprovalMode, ToolPermissionLevel } from '../../shared/workspace-agent-api'
 
 export type WorkspaceToolProfile = 'compat' | 'p0' | 'p1'
@@ -36,6 +42,8 @@ const P0_NAMES = new Set([
 ])
 
 const P1_NAMES = new Set([
+  'docx.tools',
+  'docx.call',
   'html.create',
   'office.export',
   'agent.update_plan',
@@ -69,6 +77,7 @@ const P1_NAMES = new Set([
 ])
 
 const WRITE_NAMES = new Set([
+  'docx.call',
   'html.create',
   'office.export',
   'docx.format',
@@ -121,6 +130,7 @@ const CREATE_NAMES = new Set([
 ])
 
 const REQUIRED_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  'docx.call': ['path', 'name', 'args'],
   'office.export': ['path', 'outputPath', 'format'],
   'docx.format': ['path', 'blockIds'],
   'agent.update_plan': ['steps'],
@@ -274,12 +284,45 @@ export function workspaceHarnessGuide(definitions: readonly AgentToolDef[]): str
   ].join('\n')
 }
 
+export function workspaceCallCapability(
+  call: Pick<AgentToolCall, 'name' | 'input'>,
+  descriptor?: WorkspaceToolDescriptor,
+): ToolCapability {
+  if (call.name === 'docx.call') {
+    const args = call.input.args
+    return editorToolCapability(
+      {
+        name: String(call.input.name),
+        input: args && typeof args === 'object' ? (args as Record<string, unknown>) : {},
+      },
+      'docs',
+    )
+  }
+  if (
+    descriptor?.access === 'read' ||
+    ['workspace.locations', 'workspace.find_files', 'context.read_file'].includes(call.name) ||
+    call.name.startsWith('knowledge.')
+  )
+    return 'read'
+  if (descriptor?.createsFile) return 'edit'
+  if (
+    descriptor?.access === 'write' &&
+    !descriptor.createsFile &&
+    typeof call.input.path === 'string'
+  )
+    return 'edit'
+  return 'external'
+}
+
 export function permissionForWorkspaceTool(
   catalog: readonly WorkspaceToolDescriptor[],
   name: string,
   approvalMode: AgentApprovalMode | 'legacy',
+  input: Record<string, unknown> = {},
 ): ToolPermissionLevel | null {
-  const access = catalog.find((entry) => entry.definition.name === name)?.access
+  const descriptor = catalog.find((entry) => entry.definition.name === name)
+  if (isObservation(workspaceCallCapability({ name, input }, descriptor))) return null
+  const access = descriptor?.access
   if (approvalMode === 'auto') return null
   // Extension tools without an audited access descriptor are not implicitly
   // read-only. They must at least pass the write approval gate.

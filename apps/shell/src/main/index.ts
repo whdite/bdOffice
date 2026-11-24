@@ -401,6 +401,7 @@ import {
   searchKnowledgeBase,
 } from './knowledge-base'
 import { createFileViaCli } from './mcp/headless-cli'
+import { WordFileExecutor } from './workspace-agent/word-file'
 import { createAppCliRunner, bundledCliPaths } from './bundled-cli'
 import { homeCliContext, runHomeCli, type HomeCliDeps } from './home-cli'
 import { HomeCliRuns } from './home-cli-runs'
@@ -4023,6 +4024,18 @@ async function observeFileTaskEditor(contents: WebContents, sessionId: string) {
 async function observeBoundFileTaskTarget(sessionId: string, target: TaskTargetVersion) {
   const meta = sessionStoreFor(app.getPath('userData')).info(sessionId),
     path = meta.source?.filePath
+  if (target.generatedFile) {
+    const contents =
+      tabManager?.webContentsForFile(target.path) ?? findDetachedTabByPath(target.path)?.webContents
+    const live =
+      contents && target.type ? createLiveDocumentAdapter(target.type, contents) : undefined
+    return observeTaskDocument({
+      path: target.path,
+      type: target.type,
+      live,
+      editorIdentity: contents ? `${getAssistantTaskService().bootId}:${contents.id}` : undefined,
+    })
+  }
   if (path && existsSync(path) && realpathSync.native(path) === target.path) {
     const contents =
       tabManager?.webContentsForFile(path) ?? findDetachedTabByPath(path)?.webContents
@@ -4302,6 +4315,7 @@ function getWorkspaceAgentRuntime(): WorkspaceAgentRuntimeInstance {
     },
     userDataPath: app.getPath('userData'),
     toolProfile: 'p1',
+    wordFiles: new WordFileExecutor(bundledCliRunner()),
     readAiSettings: readWorkspaceAiSettings,
     runtimeProvider: () => getRuntimeProviderManager().activeProvider(),
     readLanguage: () => currentLang(),
@@ -8535,6 +8549,7 @@ registerFileTaskIpc({
   describe: taskEditor,
   observe: observeFileTaskEditor,
   inspect: async (contents, sessionId, target) => {
+    if (target.generatedFile) return observeBoundFileTaskTarget(sessionId, target)
     const observed = await observeFileTaskEditor(contents, sessionId)
     if (observed.version.path !== target.path) throw new Error('task_context_changed')
     return observed
@@ -8807,7 +8822,7 @@ app.whenReady().then(async () => {
   // deferred to ready: labels need currentLang(), which reads app.getLocale()
   installBackToHomeItems()
   installDockMenu()
-  setUpdateCheckInvoker(() => void checkForUpdatesNow())
+  setUpdateCheckInvoker(() => void checkForUpdatesNow(() => releaseMonitor!.check()))
   setSettingsInvoker(() => openSettingsView())
   initAutoUpdater(
     () => shellWindow,

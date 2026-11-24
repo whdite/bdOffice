@@ -14,6 +14,11 @@ export interface TaskExecutionStart {
   checkpoint?: AgentSessionSnapshot
   remainingMs: number
 }
+export interface TaskApprovalScope {
+  covered?: boolean
+  round?: { path: string; baseVersion: string }
+}
+
 export interface TaskToolPermit {
   stepId: string
   reused?: ToolExecution
@@ -36,14 +41,17 @@ export interface AgentTaskExecution {
     call: AgentToolCall,
     required?: boolean,
     parentCall?: AgentToolCall,
-  ): Promise<void>
-  afterApproval?(call: AgentToolCall, allowed: boolean): Promise<void>
+  ): Promise<void | TaskApprovalScope>
+  afterApproval?(call: AgentToolCall, allowed: boolean, round?: boolean): Promise<void>
   prepareTool(call: AgentToolCall, signal: AbortSignal): Promise<TaskToolPermit>
   finishTool(
     permit: TaskToolPermit,
     result: ToolExecution,
     checkpoint: AgentSessionSnapshot,
   ): Promise<void>
+  /** Undefined when the task has no on-disk deliverable requirement. */
+  checkSaved?(): Promise<boolean | undefined>
+  pendingWordParts?(): Promise<string[]>
   finish(result: TaskExecutionEnd, checkpoint: AgentSessionSnapshot): Promise<void>
 }
 

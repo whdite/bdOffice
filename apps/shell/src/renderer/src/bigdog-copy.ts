@@ -1,17 +1,20 @@
+import { BIGDOG_REPOSITORY } from '../../shared/bigdog-release'
+
 /** Fork-owned product copy. Other UI locales use English for these new strings. */
 const EN = {
   product: 'BigDog Office',
+  productDescription:
+    'Edit documents, spreadsheets, presentations and PDFs locally. AI BigDog can help you review and revise files.',
   website: 'Official website',
   websiteOpenFailed:
     'Could not open the browser. You can copy the website link and open it manually.',
   credits: 'Built on GenOffice',
   attribution: 'Built on GenOffice. Thank you to the GenOffice team and open-source contributors.',
-  licenses:
-    'Upstream copyright, licenses and third-party notices are retained in the application distribution.',
-  releases: 'BigDog Office Releases',
+  licenses: 'Open-source licenses and third-party notices are included with the app.',
+  releases: 'Software updates',
   releaseDescription:
-    'Updates come from whdite/bdOffice on GitHub. New versions appear in the tab bar; download and install when you are ready.',
-  repository: 'GitHub · whdite/bdOffice',
+    'Check the selected channel for a version compatible with this device. Release notes and installers are available on GitHub.',
+  repository: `GitHub · ${BIGDOG_REPOSITORY}`,
   newVersion: 'Update available',
   dismissUpdate: 'Remind me next time',
   openReleases: 'View releases',
@@ -45,15 +48,15 @@ const EN = {
 
 const ZH: BigDogCopy = {
   product: '大狗Office',
+  productDescription: '在本机编辑文档、表格、演示文稿和 PDF，也可以请 AI 大狗整理资料、修改文件。',
   website: '官方网站',
   websiteOpenFailed: '暂时无法打开浏览器，请复制官网链接后访问。',
   credits: '基于 GenOffice 构建 · 致谢',
   attribution: '基于 GenOffice 构建，感谢原项目团队与所有开源贡献者。',
-  licenses: '应用发行包保留上游版权、开源许可证及第三方组件声明。',
-  releases: '大狗Office Release',
-  releaseDescription:
-    '更新来自 GitHub 的 whdite/bdOffice。发现新版时会在顶部提示，由你选择下载并安装。',
-  repository: 'GitHub · whdite/bdOffice',
+  licenses: '开源许可证和第三方组件声明随应用提供。',
+  releases: '版本更新',
+  releaseDescription: '按所选通道检查适用于本机的版本。更新说明和安装包可在 GitHub 发布页查看。',
+  repository: `GitHub · ${BIGDOG_REPOSITORY}`,
   newVersion: '发现新版',
   dismissUpdate: '下次启动再提醒',
   openReleases: '查看发布版本',
@@ -94,14 +97,16 @@ type BigDogCopy = {
 
 const ZH_TW: BigDogCopy = {
   ...ZH,
+  productDescription: '在本機編輯文件、試算表、簡報與 PDF，也可以請 AI 大狗整理資料、修改檔案。',
   website: '官方網站',
   websiteOpenFailed: '暫時無法開啟瀏覽器，請複製官網連結後造訪。',
   credits: '基於 GenOffice 建構 · 致謝',
   attribution:
     '大狗Office 基於開源專案 GenOffice 建構，增加本機工作區 Agent 與辦公流程改進。感謝 GenOffice 團隊及所有開源貢獻者。',
-  licenses: '應用程式發行包保留上游版權、開源授權及第三方元件聲明。',
+  licenses: '開源授權與第三方元件聲明隨應用程式提供。',
+  releases: '版本更新',
   releaseDescription:
-    '更新來自 GitHub 的 whdite/bdOffice。發現新版時會在頂部提示，由你選擇下載並安裝。',
+    '依所選通道檢查適用於這台裝置的版本。更新說明與安裝檔可在 GitHub 發布頁面查看。',
   newVersion: '發現新版',
   dismissUpdate: '下次啟動再提醒',
   openReleases: '查看發佈版本',

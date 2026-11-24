@@ -98,6 +98,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('docs:discard-password-intents', throughRevision),
   consumePendingOpenDocx: () => ipcRenderer.invoke('docs:consume-pending-open'),
   consumeNewBlankDoc: () => ipcRenderer.invoke('docs:consume-new-blank'),
+  finishGeneratedSave: (id: string, saved: boolean) =>
+    ipcRenderer.invoke('docs:finish-generated-save', id, saved),
   consumeAiDocContent: () => ipcRenderer.invoke('docs:consume-ai-doc-content'),
   consumeHeadlessExport: () => ipcRenderer.invoke('docs:consume-headless-export'),
   headlessExportDone: (result: { ok: boolean; error?: string }) =>

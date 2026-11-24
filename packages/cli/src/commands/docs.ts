@@ -20,6 +20,7 @@ import {
   listStyles,
   openDocument,
   saveDocument,
+  runWordOperation,
 } from '../formats/docx'
 import { previewChars } from '../preview'
 import { checkDocument, DOCS_CHECKS } from '../formats/docx-check'
@@ -36,7 +37,7 @@ export const docsCommand: CommandDef = {
   name: 'docs',
   summary: 'Read or edit a .docx with the same ops the in-app AI uses.',
   usage:
-    'docs <read|apply|check> <file.docx> [options] | docs compare <original.docx> <revised.docx> --out <path>',
+    'docs <read|apply|check> <file.docx> [options] | docs tool <file.docx> --ops <call.json> [--out <path>] | docs compare <original.docx> <revised.docx> --out <path>',
   options: [
     { name: 'range', value: 'a-b', description: 'read: block index range (default: all)' },
     { name: 'html', description: 'read: also return the range as restricted HTML' },
@@ -136,6 +137,8 @@ export const docsCommand: CommandDef = {
   async run(args, ctx) {
     const [verb, file, second] = args.positionals
     switch (verb) {
+      case 'tool':
+        return nativeTool(file, args, ctx)
       case 'read':
         return read(file, args, ctx)
       case 'apply':
@@ -230,6 +233,38 @@ async function check(file: string | undefined, ctx: CommandContext): Promise<Com
   const doc = await openDocument(readInput(path))
   try {
     return checkResult(path, checkDocument(doc), DOCS_CHECKS)
+  } finally {
+    closeDocument(doc)
+  }
+}
+
+/** Byte-in/byte-out Word capability used by the workspace's headless session. */
+async function nativeTool(
+  file: string | undefined,
+  args: Args,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const path = resolveInput(file, ctx)
+  const call = JSON.parse(readOpsInput(args, ctx).text)
+  if (
+    !call ||
+    typeof call.name !== 'string' ||
+    !call.input ||
+    typeof call.input !== 'object' ||
+    Array.isArray(call.input)
+  )
+    throw new CliError(EXIT.usage, 'Expected a Word tool name and input object.')
+  const doc = await openDocument(readInput(path))
+  try {
+    const result = await runWordOperation(doc, call.name, call.input)
+    const changed = !result.isError && (result.mutated || result.effect === 'applied')
+    if (changed) {
+      const out = flagString(args, 'out')
+      if (!out) throw new CliError(EXIT.usage, 'Supply an output path for the edited model.')
+      const output = resolveOutput(out, ctx, { fresh: true, force: flagBool(args, 'force') })
+      writeOutput(output, await saveDocument(doc))
+    }
+    return { summary: result.summary, detail: { result } }
   } finally {
     closeDocument(doc)
   }

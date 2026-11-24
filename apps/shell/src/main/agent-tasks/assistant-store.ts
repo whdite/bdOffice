@@ -14,9 +14,17 @@ import {
   type TaskTargetVersion,
 } from '../../shared/assistant-task-api'
 
+import { updateWordChecks } from '@genoffice/agent-core'
 type Row = Record<string, unknown>
 export const TASK_EXECUTOR = 'local-office'
 const RESOURCE = 'local-office:mutation'
+const targetKey = (path: string) =>
+  process.platform === 'win32' ? path.replace(/\\/g, '/').toLowerCase() : path
+function resourceDomain(tool: string): string {
+  if (tool.startsWith('computer')) return 'computer'
+  if (tool === 'run_cli' || tool === 'workspace.run_command') return 'command'
+  return tool.split('.')[0]!
+}
 const LEASE_MS = 30_000
 const MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 const MAX_REQUEST_BYTES = 36 * 1024 * 1024
@@ -53,6 +61,7 @@ export interface TaskStepStart {
   targets: TaskTargetVersion[]
 }
 export interface TaskStepReceipt {
+  wordSaveVerified?: boolean
   result: ToolExecution
   targets: TaskTargetVersion[]
   effect: 'applied' | 'not_applied' | 'unknown'
@@ -63,6 +72,7 @@ interface Plan {
   resumeRequested?: boolean
   retryRequestId?: string
   lastTargets?: TaskTargetVersion[]
+  pendingWordParts?: Record<string, string>
   modelCalls?: Record<string, number | null>
   reply?: { confirmationId: string; text: string }
 }
@@ -161,14 +171,9 @@ export class AssistantTaskStore {
         json({ taskId: id, kind }),
       )
   }
-  private release(id: string, keepOwner = false, quarantine = false): void {
-    if (quarantine)
-      this.db
-        .prepare(
-          "UPDATE execution_resources SET state='quarantined',updated_at=? WHERE owner_task_id=?",
-        )
-        .run(this.now(), id)
-    else this.db.prepare('DELETE FROM execution_resources WHERE owner_task_id=?').run(id)
+  private release(id: string, keepOwner = false): void {
+    // Uncertain steps retain their target fences after releasing the active executor.
+    this.db.prepare('DELETE FROM execution_resources WHERE owner_task_id=?').run(id)
     this.db.prepare('DELETE FROM task_leases WHERE task_id=?').run(id)
     if (!keepOwner) this.db.prepare('DELETE FROM session_owners WHERE task_id=?').run(id)
   }
@@ -200,6 +205,12 @@ export class AssistantTaskStore {
           "INSERT INTO executors(id,device_id,boot_id,authority_revision,capabilities_json,availability,last_seen_at) VALUES(?,?,?,1,'{}','online',?) ON CONFLICT(id) DO UPDATE SET boot_id=excluded.boot_id,availability='online',last_seen_at=excluded.last_seen_at",
         )
         .run(TASK_EXECUTOR, TASK_EXECUTOR, taskId(bootId), stamp)
+      // Older ledgers used a machine-wide quarantine. Their unfinished steps still identify the targets.
+      this.db
+        .prepare(
+          "DELETE FROM execution_resources WHERE state='quarantined' AND owner_task_id IN (SELECT id FROM tasks WHERE kind='assistant')",
+        )
+        .run()
       const old = this.db
         .prepare('SELECT task_id,attempt_id FROM task_leases WHERE boot_id<>?')
         .all(bootId)
@@ -223,7 +234,7 @@ export class AssistantTaskStore {
         const uncertain = this.uncertain(id),
           waited = row.state === 'waiting_user'
         this.invalidateConfirmations(id)
-        this.release(id, uncertain || (!row.pending_control && !waited), uncertain)
+        this.release(id, uncertain || (!row.pending_control && !waited))
         const state = uncertain
           ? 'interrupted'
           : row.pending_control === 'cancel'
@@ -719,13 +730,42 @@ export class AssistantTaskStore {
       )
         throw new Error('task_stopping')
       if (this.uncertain(lease.taskId)) throw new Error('task_effect_requires_review')
+      if (input.recovery !== 'repeat_read') {
+        const unresolved = this.db
+          .prepare(
+            "SELECT label,targets_json,recovery FROM task_steps WHERE state='awaiting_reconciliation' AND task_id<>?",
+          )
+          .all(lease.taskId)
+        for (const row of unresolved) {
+          if (row.recovery === 'repeat_read') continue
+          const previous = parse<TaskTargetVersion[]>(row.targets_json)
+          const overlaps = previous.some((a) =>
+            input.targets.some(
+              (b) =>
+                targetKey(a.path) === targetKey(b.path) ||
+                (!!a.fileIdentity && a.fileIdentity === b.fileIdentity) ||
+                (!!a.editorIdentity && a.editorIdentity === b.editorIdentity),
+            ),
+          )
+          if (
+            overlaps ||
+            ((row.recovery === 'user_reconcile' || !previous.length) &&
+              resourceDomain(String(row.label)) === resourceDomain(input.label))
+          ) {
+            throw new Error('task_resource_requires_review')
+          }
+        }
+      }
       if (lease.epoch > 1 && input.recovery !== 'repeat_read') {
         const reviewed = this.db
           .prepare(
             "SELECT 1 FROM task_steps WHERE task_id=? AND operation_digest=? AND state='superseded' AND effect_state='unknown' LIMIT 1",
           )
           .get(lease.taskId, input.digest)
-        if (reviewed) throw new Error('task_effect_requires_review')
+        if (reviewed)
+          throw new Error(
+            'This exact operation was already reviewed. Read its target and continue from the current state without replaying it.',
+          )
         const prior = this.db
           .prepare(
             "SELECT id,receipt_json FROM task_steps WHERE task_id=? AND operation_digest=? AND plan_revision<? AND state IN ('verified','failed') AND effect_state='applied' ORDER BY rowid DESC LIMIT 1",
@@ -804,6 +844,7 @@ export class AssistantTaskStore {
                 summary: bounded(receipt.result.summary, 240),
                 isError: receipt.result.isError,
                 mutated: receipt.result.mutated,
+                effect: receipt.effect,
                 denied: receipt.result.denied,
               },
             }),
@@ -829,6 +870,11 @@ export class AssistantTaskStore {
           targets.set(target.path, target)
         }
         plan.lastTargets = [...targets.values()]
+        if (receipt.result.wordPart) {
+          const missing = new Map(Object.entries(plan.pendingWordParts ?? {}))
+          updateWordChecks(missing, receipt.result.wordPart)
+          plan.pendingWordParts = Object.fromEntries(missing)
+        }
         this.event(
           lease.taskId,
           'step.' + (receipt.effect === 'unknown' ? 'uncertain' : 'observed'),
@@ -1016,7 +1062,7 @@ export class AssistantTaskStore {
           this.now(),
           lease.attemptId,
         )
-      this.release(id, state === 'interrupted' || state === 'waiting_user', uncertain)
+      this.release(id, state === 'interrupted' || state === 'waiting_user')
       if (!uncertain) this.db.prepare('UPDATE tasks SET pending_control=NULL WHERE id=?').run(id)
       const sequence = this.transition(id, state, uncertain ? 'outcome_unknown' : result.reason)
       if (state === 'waiting_user') {
@@ -1101,23 +1147,36 @@ export class AssistantTaskStore {
     })
   }
   reconciliationTargets(id: string): TaskTargetVersion[] {
-    const request = this.request(id),
-      plan = this.plan(id)
-    const targets = new Map(
-      (plan.lastTargets ?? (request.document ? [request.document] : [])).map((item) => [
-        item.path,
-        item,
-      ]),
-    )
-    for (const row of this.db
+    const uncertain = this.db
       .prepare(
         "SELECT targets_json FROM task_steps WHERE task_id=? AND state='awaiting_reconciliation'",
       )
-      .all(id)) {
+      .all(id)
+    if (!uncertain.length) {
+      const document = this.request(id).document
+      return this.plan(id).lastTargets ?? (document ? [document] : [])
+    }
+    const targets = new Map<string, TaskTargetVersion>()
+    for (const row of uncertain) {
       for (const target of parse<TaskTargetVersion[]>(row.targets_json))
         targets.set(target.path, target)
     }
     return [...targets.values()]
+  }
+  private resumeBlocker(row: Row): string | undefined {
+    const budget = parse<AssistantTaskBudget>(row.budget_json)
+    if (
+      budget.usedAttempts >= budget.maxAttempts ||
+      budget.usedModelTurns >= budget.maxModelTurns ||
+      budget.usedActiveMs >= budget.maxActiveMs
+    )
+      return 'task_budget_exhausted'
+    const later = this.db
+      .prepare(
+        "SELECT 1 FROM tasks WHERE session_id=? AND id<>? AND created_at>? AND json_extract(budget_json,'$.usedModelTurns')>0 LIMIT 1",
+      )
+      .get(String(row.session_id), String(row.id), Number(row.created_at))
+    return later ? 'task_conversation_changed' : undefined
   }
   control(input: AssistantTaskControl, reviewedTargets?: TaskTargetVersion[]): AssistantTaskView {
     return this.tx(() => {
@@ -1166,17 +1225,30 @@ export class AssistantTaskStore {
             "UPDATE task_steps SET state='superseded',effect_state='unknown',revision=revision+1 WHERE task_id=? AND state='awaiting_reconciliation'",
           )
           .run(id)
-        this.release(id)
         const control = row.pending_control
+        const blocker = input.continueAfterReview ? this.resumeBlocker(row) : undefined
+        const resume = input.continueAfterReview === true && control !== 'cancel' && !blocker
+        this.release(id, resume)
         this.db.prepare('UPDATE tasks SET pending_control=NULL,plan_json=? WHERE id=?').run(
           json({
             ...parse<Plan>(row.plan_json),
-            lastTargets: reviewedTargets,
-            resumeRequested: false,
+            lastTargets: [
+              ...new Map(
+                [...(this.plan(id).lastTargets ?? []), ...(reviewedTargets ?? [])].map((target) => [
+                  target.path,
+                  target,
+                ]),
+              ).values(),
+            ],
+            resumeRequested: resume,
           }),
           id,
         )
-        this.transition(id, control === 'cancel' ? 'cancelled' : 'paused', 'effects_reviewed')
+        this.transition(
+          id,
+          control === 'cancel' ? 'cancelled' : resume ? 'queued' : 'paused',
+          blocker ?? 'effects_reviewed',
+        )
       } else if (input.action === 'pause' || input.action === 'cancel') {
         if (!TASK_TERMINAL_STATES.has(state)) {
           if (active || uncertain) {
@@ -1206,19 +1278,8 @@ export class AssistantTaskStore {
           ].includes(state)
         )
           throw new Error('task_cannot_resume')
-        const budget = parse<AssistantTaskBudget>(row.budget_json)
-        if (
-          budget.usedAttempts >= budget.maxAttempts ||
-          budget.usedModelTurns >= budget.maxModelTurns ||
-          budget.usedActiveMs >= budget.maxActiveMs
-        )
-          throw new Error('task_budget_exhausted')
-        const later = this.db
-          .prepare(
-            "SELECT 1 FROM tasks WHERE session_id=? AND id<>? AND created_at>? AND json_extract(budget_json,'$.usedModelTurns')>0 LIMIT 1",
-          )
-          .get(String(row.session_id), id, Number(row.created_at))
-        if (later) throw new Error('task_conversation_changed')
+        const blocker = this.resumeBlocker(row)
+        if (blocker) throw new Error(blocker)
         const plan = parse<Plan>(row.plan_json)
         this.db.prepare('UPDATE tasks SET plan_json=?,pending_control=NULL WHERE id=?').run(
           json({
@@ -1259,6 +1320,13 @@ export class AssistantTaskStore {
       budget: parse(row.budget_json),
       ...(row.reason_code ? { reason: String(row.reason_code) } : {}),
       ...(row.pending_control ? { pendingControl: row.pending_control as 'pause' | 'cancel' } : {}),
+      ...(['outcome_unknown', 'task_context_changed', 'task_unsaved_context_unavailable'].includes(
+        String(row.reason_code),
+      )
+        ? {
+            reviewTargets: this.reconciliationTargets(id).map((item) => item.path),
+          }
+        : {}),
       steps: this.db
         .prepare(
           'SELECT id,label,state,effect_state FROM task_steps WHERE task_id=? ORDER BY display_order',
@@ -1293,6 +1361,48 @@ export class AssistantTaskStore {
       .all(id)
       .map((row) => parse(row.evidence_json))
   }
+  /** Latest host-observed writer receipt for each deliverable, invalidated by subsequent changes. */
+  saveTargets(id: string): Array<{ path: string; saved?: TaskTargetVersion }> {
+    const targets = new Map<
+      string,
+      { path: string; saved?: TaskTargetVersion; identity?: string }
+    >()
+    const steps = this.db
+      .prepare(
+        "SELECT label,state,effect_state,receipt_json FROM task_steps WHERE task_id=? AND receipt_json IS NOT NULL AND recovery<>'repeat_read' ORDER BY display_order",
+      )
+      .all(id)
+    for (const step of steps) {
+      const receipt = parse<TaskStepReceipt>(step.receipt_json)
+      const writer =
+        /^(?:save_document|save_workbook|save|(?:office|docx|xlsx|pptx|md)\.save|(?:docx|xlsx|pptx|md|html)\.create|office\.export|pdf\.export_pages)$/.test(
+          String(step.label),
+        )
+      if (!writer && step.effect_state !== 'applied') continue
+      for (const target of receipt.targets) {
+        if (!target.type || target.type === 'unknown') continue
+        if (target.editorIdentity && target.exists)
+          for (const [key, prior] of targets)
+            if (prior.identity === target.editorIdentity && key !== target.path && !prior.saved)
+              targets.delete(key)
+        targets.set(target.path, {
+          path: target.path,
+          identity: target.editorIdentity,
+          ...((writer || (step.label === 'create_document' && target.generatedFile)) &&
+          receipt.wordSaveVerified !== false &&
+          step.state === 'verified' &&
+          target.complete &&
+          target.exists &&
+          target.diskDigest &&
+          !target.dirty
+            ? { saved: target }
+            : {}),
+        })
+      }
+    }
+    return [...targets.values()]
+  }
+
   unfulfilledOperation(id: string): 'approval_expired' | 'operation_not_completed' | undefined {
     this.row(id)
     const operations = this.db

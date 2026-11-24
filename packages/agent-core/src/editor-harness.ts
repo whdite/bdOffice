@@ -1,3 +1,4 @@
+import { explicitlyRequestsSave, wordPartReader } from './tool-capability'
 import type { ExecutedToolCall } from './skill'
 import type { AgentToolDef } from './types'
 
@@ -24,7 +25,7 @@ export const EDITOR_ROUTES: Record<EditorHarnessKind, EditorRoute> = {
     write: ['apply_ops', 'replace_blocks', 'insert_content', 'write_document'],
     verify: ['read_blocks', 'get_document_context', 'read_comments', 'read_revisions'],
     guide:
-      "DOCX: read_blocks returns restricted HTML, with 0-based block indexes. For title text use apply_ops with findReplace; heading level uses setHeadingLevel; title font/color uses setFont (color), NOT setParagraphFormat.shadingFill (background). Font sizes are points. For long drafting use write_document with a concrete plan and references. Short exact replacements use replace_blocks; short additions use insert_content. Never rewrite the whole document for a targeted edit. Preserve unrelated formatting and narrow targets. Read comments before replying/resolving; document context includes headers/footers. Never accept/reject revisions on the user's behalf.",
+      'Use the Word skill’s tool guide for local edits, selection and structure. Read back the affected Word part.',
   },
   sheets: {
     read: ['get_workbook_context', 'read_range', 'load_guide'],
@@ -132,8 +133,8 @@ function verificationReaders(kind: EditorHarnessKind, name: string): readonly st
       ? ['read_frontmatter']
       : ['read_blocks', 'get_document_context']
   if (kind === 'docs') {
-    if (name === 'reply_comment' || name === 'resolve_comment') return ['read_comments']
-    if (name === 'set_header_footer') return ['get_document_context']
+    const reader = wordPartReader(name)
+    if (reader) return [reader]
     return ['read_blocks', 'get_document_context']
   }
   if (kind === 'pdf') {
@@ -161,8 +162,22 @@ export function verifyEditorResponse(
   const zh = /[\u3400-\u9fff]/u.test(instruction)
   let lastMutation = -1
   executed.forEach((call, index) => {
-    if (call.mutated) lastMutation = index
+    if (call.mutated || call.effect === 'applied') lastMutation = index
   })
+  if (
+    kind === 'docs' &&
+    explicitlyRequestsSave(instruction) &&
+    !executed.some((t) => t.name === 'create_document') &&
+    tools.some((t) => t.name === 'save_document') &&
+    !executed.slice(lastMutation + 1).some((t) => t.name === 'save_document' && t.ok) &&
+    !executed.some((t) => t.name === 'save_document' && !t.ok)
+  ) {
+    return {
+      correction:
+        'Save the current document version through save_document before reporting completion.',
+      fallback: zh ? '当前版本尚未取得保存回执。' : 'Saving the current version was not confirmed.',
+    }
+  }
   const primaryWrite = executed.some(
     (call) => call.ok && EDITOR_ROUTES[kind].write.includes(call.name),
   )
@@ -173,7 +188,7 @@ export function verifyEditorResponse(
   )
   if (lastMutation >= 0) {
     const missing = executed.flatMap((write, index) => {
-      if (!write.mutated) return []
+      if (!write.mutated && write.effect !== 'applied') return []
       const readers = namesIn(verificationReaders(kind, write.name), tools)
       return readers.length &&
         !executed.slice(index + 1).some((read) => read.ok && readers.includes(read.name))

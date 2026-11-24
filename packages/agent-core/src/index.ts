@@ -11,9 +11,25 @@ export type {
   AgentTransport,
   MindMapTreeNode,
   ToolDisplay,
+  WordPartEvidence,
   ToolExecution,
 } from './types'
 export { composeSkills } from './skill'
+export {
+  editorToolCapability,
+  isRoundWordEdit,
+  isObservation,
+  recoveryForCapability,
+  explicitlyRequestsSave,
+  wordToolReceipt,
+} from './tool-capability'
+export type { ToolCapability, ToolEffect } from './tool-capability'
+export {
+  executeWordOperation,
+  unverifiedWordParts,
+  updateWordChecks,
+  WORD_OPERATIONS,
+} from './workspace-word'
 export { validateToolInput } from './tool-input-schema'
 export { boundedToolImages, durableMessages, withoutToolImages } from './tool-images'
 export {
@@ -100,6 +116,7 @@ export type {
   TaskStartInput,
   TaskExecutionStart,
   TaskToolPermit,
+  TaskApprovalScope,
   TaskExecutionEnd,
 } from './task-execution'
 export { createEditorSaveSkill, withEditorSaveSkill, type EditorSaveBridge } from './editor-save'

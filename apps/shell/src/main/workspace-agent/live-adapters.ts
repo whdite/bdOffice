@@ -476,6 +476,9 @@ class SlidesLiveAdapter implements LiveDocumentAdapter {
 }
 
 class DocsLiveAdapter implements LiveDocumentAdapter {
+  async cancelWord(id: string): Promise<void> {
+    await bridgeCall(this.webContents, 'cancelWord', [id])
+  }
   readonly type = 'docx' as const
 
   constructor(private readonly webContents: WebContents) {}

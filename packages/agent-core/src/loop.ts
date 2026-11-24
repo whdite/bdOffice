@@ -6,6 +6,7 @@ import {
   type TaskToolPermit,
 } from './task-execution'
 import type { AgentSkill, ExecutedToolCall } from './skill'
+import { unverifiedWordParts } from './workspace-word'
 import {
   editorHarnessPrompt,
   editorHarnessTools,
@@ -657,6 +658,9 @@ export class AgentLoop<TSnapshot = unknown> {
   private executedCalls: ExecutedToolCall[] = []
   /** verifyResponse may force one extra corrective turn per run — never more */
   private verifyRetryUsed = false
+  private saveRetryUsed = false
+  private partRetryUsed = false
+  private completionError: string | undefined
   private editorVerifyRetries = 0
   private runInstruction = ''
   private offeredToolDefinitions: AgentToolDef[] = []
@@ -706,7 +710,10 @@ export class AgentLoop<TSnapshot = unknown> {
               ? 'waiting_user'
               : result.cancelled
                 ? 'cancelled'
-                : 'completed',
+                : this.completionError
+                  ? 'failed'
+                  : 'completed',
+            ...(this.completionError ? { error: this.completionError } : {}),
             text: result.text,
             ...(result.waitingForUser && this.taskQuestion ? { question: this.taskQuestion } : {}),
           })
@@ -947,6 +954,9 @@ export class AgentLoop<TSnapshot = unknown> {
     this.redundantReadTurns = 0
     this.executedCalls = []
     this.verifyRetryUsed = false
+    this.saveRetryUsed = false
+    this.partRetryUsed = false
+    this.completionError = undefined
     this.editorVerifyRetries = 0
     this.runInstruction = instruction
     this.responseCheckNotes.clear()
@@ -1034,10 +1044,7 @@ export class AgentLoop<TSnapshot = unknown> {
   }
 
   /** Compact (if needed), push the user message, then start the turn. Compaction failure doesn't block the run. */
-  private async beginRun(
-    userMsg: AgentMessage,
-    snapshot?: DocumentContextSnapshot,
-  ): Promise<void> {
+  private async beginRun(userMsg: AgentMessage, snapshot?: DocumentContextSnapshot): Promise<void> {
     const generation = this.generation
     if (this.persistenceAvailable()) {
       let restored: AgentSessionSnapshot | null = null
@@ -1882,7 +1889,80 @@ export class AgentLoop<TSnapshot = unknown> {
     // check the claims in it against the tools that actually ran this run.
     // A returned correction forces one more model turn (tools stay available,
     // so the model can perform the missing action or reword its claim).
-    if (toolCalls.length === 0 && !this.cancelled && !this.finalizing) {
+    if (!toolCalls.length && !this.cancelled) {
+      const generation = this.generation
+      const missing = this.activeTask?.pendingWordParts
+        ? await this.activeTask.pendingWordParts()
+        : unverifiedWordParts(this.executedCalls)
+      if (generation !== this.generation || this.cancelled) return
+      this.completionError = undefined
+      if (missing.length && !this.executedCalls.some((call) => call.denied)) {
+        if (
+          !this.finalizing &&
+          !this.partRetryUsed &&
+          this.turns < (this.options.maxTurns ?? DEFAULT_MAX_TURNS)
+        ) {
+          this.partRetryUsed = true
+          this.appendResponseCheck(
+            'Read back each changed Word part in the same document. Use get_document_context for headers, footers or sections, list_styles for style properties, and the named reader for notes, comments or revisions. Check these values: ' +
+              missing.join(', '),
+          )
+          this.startTurn()
+          return
+        }
+        this.completionError = 'result_not_verified'
+        this.turnText =
+          (/[\u3400-\u9fff]/u.test(this.runInstruction)
+            ? '以下 Word 部件的修改尚未核实：'
+            : 'Changes to these Word parts could not be verified: ') + missing.join(', ')
+        events?.onText?.(this.turnText)
+      }
+    }
+    let saveUnconfirmed = false
+    if (
+      (toolCalls.length === 0 || this.finalizing) &&
+      !this.cancelled &&
+      (this.activeTask?.checkSaved || skill.checkSaved)
+    ) {
+      const generation = this.generation
+      const saved = this.activeTask?.checkSaved
+        ? await this.activeTask.checkSaved()
+        : await skill.checkSaved?.(this.runInstruction)
+      if (generation !== this.generation || this.cancelled) return
+      if (saved === false) {
+        const blocked = this.executedCalls.some(
+          (call) =>
+            call.denied ||
+            call.name === 'create_document' ||
+            (!call.ok && /(?:^save_document$|\.save$)/.test(call.name)),
+        )
+        if (
+          !blocked &&
+          !this.finalizing &&
+          !this.saveRetryUsed &&
+          this.turns < (this.options.maxTurns ?? DEFAULT_MAX_TURNS)
+        ) {
+          this.saveRetryUsed = true
+          this.appendResponseCheck(
+            'The user requested a saved file. The current deliverable lacks a matching writer receipt. Save the affected document through its declared writer, then check the result.',
+          )
+          this.startTurn()
+          return
+        }
+        saveUnconfirmed = true
+        this.turnText = /[\u3400-\u9fff]/u.test(this.runInstruction)
+          ? '当前版本尚未取得保存回执。'
+          : 'Saving the current version was not confirmed.'
+        events?.onText?.(this.turnText)
+      }
+    }
+    if (
+      toolCalls.length === 0 &&
+      !this.cancelled &&
+      !this.finalizing &&
+      !saveUnconfirmed &&
+      !this.completionError
+    ) {
       const kind = this.options.editorHarness
       const issue = kind
         ? verifyEditorResponse(
@@ -1931,6 +2011,7 @@ export class AgentLoop<TSnapshot = unknown> {
       if (
         this.finalizing &&
         this.finalizing !== 'approval-denied' &&
+        !saveUnconfirmed &&
         !this.cancelled &&
         this.options.editorHarness
       ) {
@@ -2293,7 +2374,7 @@ export class AgentLoop<TSnapshot = unknown> {
     this.history.push(note)
     // A corrective turn may emit ONLY tools. Clear the rejected prose now,
     // before onTurnEnd could seal it into an editor's conversation history.
-    if (this.options.editorHarness) this.options.events?.onText?.('')
+    this.options.events?.onText?.('')
   }
 
   private recordExecution(call: AgentToolCall, execution: ToolExecution): void {
@@ -2306,6 +2387,8 @@ export class AgentLoop<TSnapshot = unknown> {
       name: call.name,
       ok: !execution.isError,
       ...(execution.mutated ? { mutated: true } : {}),
+      ...(execution.effect ? { effect: execution.effect } : {}),
+      ...(execution.wordPart ? { wordPart: execution.wordPart } : {}),
       ...(execution.denied ? { denied: true } : {}),
     })
   }
@@ -2318,6 +2401,7 @@ export class AgentLoop<TSnapshot = unknown> {
     const signal = this.abortController?.signal
     let snapshot: TSnapshot | undefined
     let permit: TaskToolPermit | undefined
+    let dispatched = false
     try {
       if (
         call.name === ASK_TASK_USER.name &&
@@ -2361,11 +2445,17 @@ export class AgentLoop<TSnapshot = unknown> {
       const task = this.activeTask
       let approved = !signal?.aborted
       if (approved && this.options.transport.approveTool) {
-        await task?.beforeApproval?.(call)
-        approved = await this.waitForTaskDecision(() =>
-          this.options.transport.approveTool!(call, signal),
-        )
-        await task?.afterApproval?.(call, approved)
+        const scope = await task?.beforeApproval?.(call)
+        const decision =
+          scope?.covered ||
+          (await this.waitForTaskDecision(() =>
+            this.options.transport.approveTool!(call, signal, {
+              ...(this.options.editorHarness ? { editor: this.options.editorHarness } : {}),
+              ...(scope?.round ? { round: scope.round } : {}),
+            }),
+          ))
+        approved = decision === true || decision === 'allow-round'
+        await task?.afterApproval?.(call, approved, decision === 'allow-round')
       }
       if (!approved) {
         return {
@@ -2395,13 +2485,14 @@ export class AgentLoop<TSnapshot = unknown> {
         if (permit.reused) return { execution: permit.reused, permit }
         signal?.throwIfAborted()
       }
+      dispatched = true
       const effect = this.options.skill.executeTool(call, signal)
       // Do not release the durable mutation resource while a tool still owns an effect.
       const execution = await (task ? effect : awaitToolOrAbort(effect, signal))
       return {
         execution:
           execution === TOOL_ABORTED
-            ? { output: TOOL_ABORTED_OUTPUT, isError: true, summary: call.name }
+            ? { output: TOOL_ABORTED_OUTPUT, isError: true, effect: 'unknown', summary: call.name }
             : execution,
         snapshot,
         permit,
@@ -2411,6 +2502,7 @@ export class AgentLoop<TSnapshot = unknown> {
         execution: {
           output: error instanceof Error ? error.message : String(error),
           isError: true,
+          effect: dispatched ? 'unknown' : 'not_applied',
           summary: call.name,
         },
         snapshot,

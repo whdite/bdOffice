@@ -245,6 +245,8 @@ export interface WorkspaceAgentEvent {
   stepId?: string
   type: WorkspaceAgentEventType
   timestamp: string
+  /** Replace provisional assistant text when its proposed completion is corrected. */
+  replaceText?: boolean
   text?: string
   role?: 'user' | 'assistant'
   tool?: {

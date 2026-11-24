@@ -1,4 +1,5 @@
 /** Pure Agent boundary validation, shared by live editors and closed-file sessions. */
+import { WORD_OPERATIONS } from '@genoffice/agent-core'
 import { validateToolInput } from './tool-input-schema'
 import { CHART_TYPES, WORKBOOK_FORMAT_SCHEMA } from './workbook-tool-schema'
 import { DOCX_STYLE_SCHEMA } from './docx-tool-schema'
@@ -17,6 +18,15 @@ export function documentCommandKind(command: Command): string {
 
 export function documentCommandError(type: string, command: Command): string | null {
   const kind = documentCommandKind(command)
+  if (type === 'docx' && kind === 'word_tool') {
+    return (command.name === 'guide' || WORD_OPERATIONS.some((name) => name === command.name)) &&
+      typeof command.runId === 'string' &&
+      command.args !== null &&
+      typeof command.args === 'object' &&
+      !Array.isArray(command.args)
+      ? null
+      : 'Invalid Word tool or arguments. Read docx.tools for available operations.'
+  }
   const allowed: Record<string, readonly string[]> = {
     docx: ['edit', 'replace_text', 'replace_blocks', 'insert_content', 'format'],
     pptx: ['edit', 'replace_text', 'regenerate_slide'],

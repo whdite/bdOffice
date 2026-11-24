@@ -574,8 +574,8 @@ export function workspaceErrorText(value: string, lang: Lang | string | undefine
       : 'This run reached its execution limit. Completed steps remain available; review unsaved changes before continuing the remaining work.'
   if (value === 'task_effect_requires_review')
     return isChineseWorkspaceLanguage(lang)
-      ? '上一步操作的结果需要核对，请在工作记录中确认后再继续，避免重复执行。'
-      : 'Review the previous action in Work records before continuing, to avoid repeating it.'
+      ? '请核对本对话中上一步操作的结果，然后继续。'
+      : 'Review the previous action in this conversation to continue.'
   if (/changed on disk after this Agent run|has newer document edits/u.test(value))
     return isChineseWorkspaceLanguage(lang)
       ? '文件已有后续修改，已阻止旧版本覆盖。请先检查新修改。'

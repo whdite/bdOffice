@@ -82,6 +82,12 @@ export interface ToolDisplay {
   tree?: MindMapTreeNode
 }
 
+export interface WordPartEvidence {
+  path?: string
+  expected?: Record<string, string>
+  observed?: Record<string, string>
+}
+
 /** outcome of one tool execution */
 export interface ToolExecution {
   /** result text fed back to the model */
@@ -91,6 +97,10 @@ export interface ToolExecution {
   isError?: boolean
   /** true when the tool changed the underlying artifact (document / sheet / deck) */
   mutated?: boolean
+  savedFile?: { path: string; sha256: string }
+  wordPart?: WordPartEvidence
+  /** Host-reported effect on the operation's target, including Word parts outside the body editor. */
+  effect?: import('./tool-capability').ToolEffect
   /** External action delivery, not proof of UI postconditions or an Office undo point. */
   externalEffect?: 'applied' | 'not_applied' | 'unknown'
   /** Host approval denied/cancelled the call; stop tools for this run. */
@@ -154,6 +164,10 @@ export interface AgentStreamHandle {
 
 export interface AgentTransport {
   /** Optional host approval gate, checked immediately before skill execution. */
-  approveTool?(call: AgentToolCall, signal?: AbortSignal): Promise<boolean>
+  approveTool?(
+    call: AgentToolCall,
+    signal?: AbortSignal,
+    context?: { editor?: string; round?: { path: string; baseVersion: string } },
+  ): Promise<boolean | 'allow-round'>
   stream(request: AgentStreamRequest, callbacks: AgentStreamCallbacks): AgentStreamHandle
 }

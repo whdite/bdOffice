@@ -298,13 +298,15 @@ export interface CreateDocumentRequest {
 
 export interface CreateDocumentResult {
   ok: boolean
-  /** the created file, when it is written directly (pdf/md); docx opens as a new tab that saves itself */
+  sha256?: string
+  /** The file acknowledged by the writer, including the first save of a generated Word tab. */
   path?: string
   error?: string
 }
 
 /** AI-authored content queued for a docs tab spawned by create_document */
 export interface AiDocContent {
+  creationId?: string
   title: string
   html: string
 }
@@ -462,6 +464,7 @@ export interface DesktopApi {
   /** returns true when this tab was created via "New Document" and should start blank */
   consumeNewBlankDoc(): Promise<boolean>
   /** AI-authored content queued for this tab by create_document; one-shot, null when none */
+  finishGeneratedSave?(id: string, saved: boolean): Promise<void>
   consumeAiDocContent(): Promise<AiDocContent | null>
   /** Headless export mode: the path and format this hidden renderer must export, null in normal use */
   consumeHeadlessExport(): Promise<HeadlessExportTarget | null>

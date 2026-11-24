@@ -1,3 +1,4 @@
+import { explicitlyRequestsSave } from '@genoffice/agent-core'
 import { randomUUID } from 'node:crypto'
 import type { AssistantTaskService } from '../agent-tasks/service'
 import type { WorkspaceAgentRuntime } from '../workspace-agent/service'
@@ -39,7 +40,9 @@ export async function submitAssistantMessage(
     entry: 'workspace',
     input,
     document,
-    requiredResult: input.requiredResult ?? 'answer',
+    requiredResult: explicitlyRequestsSave(input.text)
+      ? 'saved_artifact'
+      : (input.requiredResult ?? 'answer'),
   })
   if (waitForCompletion) {
     const result = await tasks.wait(receipt.task.id)

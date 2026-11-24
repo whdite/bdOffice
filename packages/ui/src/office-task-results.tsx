@@ -51,6 +51,10 @@ export function officeTaskCopy(lang: string) {
       '上一次操作的结果尚未确认。请核对应用或文件的当前状态，并确认旧执行已经停止。',
       'The previous action has an uncertain result. Review the current app or file state and make sure the old execution has stopped.',
     ],
+    task_resource_requires_review: [
+      '该文件或操作在另一项任务中有待核对的结果。请打开该任务的对话。',
+      'This file or action has a pending review in another task. Open that conversation to continue.',
+    ],
     task_effect_requires_review: [
       '上一次操作需要先核对。',
       'Review the previous action before continuing.',
@@ -94,7 +98,7 @@ export function officeTaskCopy(lang: string) {
     retry: zh ? '重试' : 'Retry',
     cancel: zh ? '停止' : 'Stop',
     reviewed: zh ? '已核对结果并确认旧执行停止' : 'Outcome reviewed and previous execution stopped',
-    reconcile: zh ? '确认核对结果' : 'Confirm review',
+    reconcile: zh ? '已核对，继续任务' : 'Reviewed, continue task',
     resumeMessage: (title: string) => (zh ? `继续任务：${title}` : `Continue task: ${title}`),
     imported: zh ? '迁移的历史成果' : 'Imported result history',
     saved: zh ? '已保存' : 'Saved',
@@ -273,7 +277,6 @@ export function FileTaskPanel({
     call = api?.fileTask
   const [state, setState] = useState<FileTaskPanelState>({ tasks: [], results: [] })
   const [error, setError] = useState(''),
-    [reviewing, setReviewing] = useState<string | null>(null),
     [working, setWorking] = useState(false)
   const lastAuto = useRef(''),
     currentResume = useRef(resume)
@@ -339,13 +342,13 @@ export function FileTaskPanel({
         requestId: crypto.randomUUID(),
         expectedRevision: task.revision,
         action,
-        reviewed: action === 'reconcile' && reviewing === task.id,
+        reviewed: action === 'reconcile',
+        ...(action === 'reconcile' ? { continueAfterReview: true } : {}),
       })
       setState((current) => ({
         ...current,
         tasks: current.tasks.map((value) => (value.id === result.id ? result : value)),
       }))
-      setReviewing(null)
     } catch (error) {
       setError(
         copy.reason(error instanceof Error ? error.message.split(/[: ]/).at(-1) : undefined) ??
@@ -357,94 +360,96 @@ export function FileTaskPanel({
   }
   if (!state.tasks.length && !state.results.length) return null
   return (
-    <details className="office-task-panel" data-file-task-panel="true">
+    <details
+      className="office-task-panel"
+      data-file-task-panel="true"
+      open={state.tasks.some((task) => !!task.reviewTargets) || undefined}
+    >
       <summary>
         {copy.tasks}
         {state.tasks[0] ? ` · ${copy.status(state.tasks[0].state)}` : ''}
       </summary>
-      {state.tasks.slice(0, 8).map((task) => (
-        <div key={task.id} className="office-task-item" data-task-state={task.state}>
-          <strong>{task.title}</strong> <small>{copy.status(task.state)}</small>
-          {copy.reason(task.reason) && <p>{copy.reason(task.reason)}</p>}
-          {task.confirmation?.kind === 'clarification' && call && (
-            <TaskQuestionReply
-              key={task.confirmation.id}
-              question={task.confirmation.text}
-              lang={lang}
-              answer={async (answer) => {
-                if (!ids.current) throw new Error('Conversation unavailable')
-                const result = await call('answer', {
-                  ...ids.current,
-                  taskId: task.id,
-                  confirmationId: task.confirmation!.id,
-                  requestId: crypto.randomUUID(),
-                  expectedRevision: task.revision,
-                  answer,
-                })
-                setState((current) => ({
-                  ...current,
-                  tasks: current.tasks.map((item) => (item.id === result.id ? result : item)),
-                }))
-              }}
-            />
-          )}
-          <div className="office-task-actions">
-            {['queued', 'waiting_resource', 'running', 'waiting_user'].includes(task.state) && (
-              <button disabled={working} type="button" onClick={() => void act(task, 'pause')}>
-                {copy.pause}
-              </button>
+      {[...state.tasks]
+        .sort((a, b) => Number(!!b.reviewTargets) - Number(!!a.reviewTargets))
+        .slice(0, 8)
+        .map((task) => (
+          <div key={task.id} className="office-task-item" data-task-state={task.state}>
+            <strong>{task.title}</strong> <small>{copy.status(task.state)}</small>
+            {copy.reason(task.reason) && <p>{copy.reason(task.reason)}</p>}
+            {task.confirmation?.kind === 'clarification' && call && (
+              <TaskQuestionReply
+                key={task.confirmation.id}
+                question={task.confirmation.text}
+                lang={lang}
+                answer={async (answer) => {
+                  if (!ids.current) throw new Error('Conversation unavailable')
+                  const result = await call('answer', {
+                    ...ids.current,
+                    taskId: task.id,
+                    confirmationId: task.confirmation!.id,
+                    requestId: crypto.randomUUID(),
+                    expectedRevision: task.revision,
+                    answer,
+                  })
+                  setState((current) => ({
+                    ...current,
+                    tasks: current.tasks.map((item) => (item.id === result.id ? result : item)),
+                  }))
+                }}
+              />
             )}
-            {(['paused', 'interrupted', 'waiting_device'].includes(task.state) &&
-              task.reason !== 'outcome_unknown') ||
-            (task.resumeRequested && task.state === 'queued') ? (
-              <button
-                disabled={working || busy}
-                type="button"
-                onClick={() => void act(task, 'resume')}
-              >
-                {copy.resume}
-              </button>
-            ) : null}
-            {task.state === 'failed' && (
-              <button
-                disabled={working || busy}
-                type="button"
-                onClick={() => void act(task, 'retry')}
-              >
-                {copy.retry}
-              </button>
-            )}
-            {!['completed', 'failed', 'cancelled'].includes(task.state) && (
-              <button disabled={working} type="button" onClick={() => void act(task, 'cancel')}>
-                {copy.cancel}
-              </button>
-            )}
-            {[
-              'outcome_unknown',
-              'task_context_changed',
-              'task_unsaved_context_unavailable',
-            ].includes(task.reason ?? '') && (
-              <>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={reviewing === task.id}
-                    onChange={(event) => setReviewing(event.target.checked ? task.id : null)}
-                  />{' '}
-                  {copy.reviewed}
-                </label>
-                <button
-                  type="button"
-                  disabled={working || reviewing !== task.id}
-                  onClick={() => void act(task, 'reconcile')}
-                >
-                  {copy.reconcile}
+            <div className="office-task-actions">
+              {['queued', 'waiting_resource', 'running', 'waiting_user'].includes(task.state) && (
+                <button disabled={working} type="button" onClick={() => void act(task, 'pause')}>
+                  {copy.pause}
                 </button>
-              </>
-            )}
+              )}
+              {(['paused', 'interrupted', 'waiting_device'].includes(task.state) &&
+                task.reason !== 'outcome_unknown') ||
+              (task.resumeRequested && task.state === 'queued') ? (
+                <button
+                  disabled={working || busy}
+                  type="button"
+                  onClick={() => void act(task, 'resume')}
+                >
+                  {copy.resume}
+                </button>
+              ) : null}
+              {task.state === 'failed' && (
+                <button
+                  disabled={working || busy}
+                  type="button"
+                  onClick={() => void act(task, 'retry')}
+                >
+                  {copy.retry}
+                </button>
+              )}
+              {!['completed', 'failed', 'cancelled'].includes(task.state) && (
+                <button disabled={working} type="button" onClick={() => void act(task, 'cancel')}>
+                  {copy.cancel}
+                </button>
+              )}
+              {[
+                'outcome_unknown',
+                'task_context_changed',
+                'task_unsaved_context_unavailable',
+              ].includes(task.reason ?? '') && (
+                <>
+                  {task.reviewTargets?.map((path) => (
+                    <p key={path}>{path}</p>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={working}
+                    onClick={() => void act(task, 'reconcile')}
+                  >
+                    {task.pendingControl === 'cancel' ? copy.acknowledge : copy.reconcile}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
       {error && <p role="alert">{error}</p>}
       <PortableOfficeResults
         records={state.results}

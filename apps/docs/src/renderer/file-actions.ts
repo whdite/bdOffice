@@ -1123,22 +1123,19 @@ export function aiDocContentNodes(html: string): PmNode[] {
  * Boot-time half of the AI create_document tool: fill the fresh blank
  * document with the queued content (same restricted-HTML pipeline as
  * insert_content), then silently save it under the tool-provided title.
- * The save runs even when nothing could be parsed — the tool already
- * reported the document as created, so an unsaved untitled tab would lie.
+ * The originating conversation waits for this writer's receipt.
  */
 export async function applyAiDocContent(
   ctx: FileActionContext,
   content: AiDocContent,
-): Promise<void> {
+): Promise<boolean> {
   const { editor, doc } = ctx
-  if (!editor || !doc) return
+  if (!editor || !doc) return false
   const nodes = aiDocContentNodes(content.html)
-  if (nodes.length > 0) {
-    replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes)
-    // the document is born with this content: undo must not reach back to empty
-    resetEditorHistory(editor)
-  }
-  await save(ctx, false, true, `${content.title}.docx`)
+  if (!nodes.length) return false
+  replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes)
+  resetEditorHistory(editor)
+  return (await save(ctx, false, true, `${content.title}.docx`)) && !ctx.dirtyRef.current
 }
 
 async function saveOnce(

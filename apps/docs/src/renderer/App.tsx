@@ -116,6 +116,13 @@ import {
   type MailMergeResponse,
 } from './mail-merge/output'
 import { ZoteroDocumentController } from './zotero/controller'
+import { observedStyleProperties, patchProperties } from './ai/style-ops'
+import {
+  cancelWorkspaceWord,
+  workspaceWordCommand,
+  workspaceWordOperation,
+  wordSnapshot,
+} from './ai/workspace-docs'
 import { AiPanel, aiRevisionAuthor } from './ai/AiPanel'
 import type { WordRoundReview } from '../shared/agent-round-review'
 import { restoreAgentRound } from './editor/restore-agent-round'
@@ -521,8 +528,6 @@ import {
   type FileActionContext,
   type PendingPdfExport,
 } from './file-actions'
-import { executeCommands, type Command as AiCommand } from './ai/commands'
-import { docxRunStyle } from '../../../shell/src/shared/docx-tool-schema'
 import { isTrackedDeleted, liveText } from './ai/protocol'
 import { BlockIndex } from './pagination-index'
 import { isPhasedContentPending } from './phased-content'
@@ -2442,7 +2447,13 @@ export function App() {
           for (let i = 0; i < 100 && !fileCtxRef.current.doc; i++) {
             await new Promise((resolve) => setTimeout(resolve, 20))
           }
-          await applyAiDocContentImpl(fileCtxRef.current, aiContent)
+          let saved = false
+          try {
+            saved = await applyAiDocContentImpl(fileCtxRef.current, aiContent)
+          } finally {
+            if (aiContent.creationId)
+              await window.desktop.finishGeneratedSave?.(aiContent.creationId, saved)
+          }
         }
       })
       // Open failures also land on a blank document, or the tab stays at "Opening…" forever
@@ -2725,139 +2736,22 @@ export function App() {
       },
       mutate: (command: Record<string, unknown>) => {
         const invalid = documentCommandError('docx', command)
-        if (invalid) return { ok: false, changed: 0, description: invalid }
-        const kind =
-          typeof command.kind === 'string'
-            ? command.kind
-            : typeof command.operation === 'string'
-              ? command.operation
-              : 'replace_text'
-        if (kind === 'insert_content') {
-          const content =
-            typeof command.text === 'string'
-              ? command.text
-              : typeof command.content === 'string'
-                ? command.content
-                : ''
-          if (!content) return { ok: false, changed: 0, description: 'Provide content to insert.' }
-          const ids = (command.blockIds ?? []) as string[]
-          const found = new Set<string>()
-          let position = editor.state.doc.content.size
-          editor.state.doc.forEach((node, offset, index) => {
-            const raw = node.attrs.docxIndex
-            const id =
-              typeof raw === 'number' && Number.isInteger(raw)
-                ? `block-${raw}`
-                : `live-block-${index}`
-            if (
-              ids.includes(id) &&
-              ['docParagraph', 'docHeading', 'docListItem'].includes(node.type.name)
-            ) {
-              found.add(id)
-              position = offset + node.nodeSize
-            }
-          })
-          if (found.size !== new Set(ids).size)
-            return {
-              ok: false,
-              changed: 0,
-              description: 'Every blockId must identify an editable document block.',
-            }
-          // Plain text, appended after the last selected block (or at document end).
-          // Never interpret model text as HTML or use the user's transient caret.
-          const inserted = editor.commands.insertContentAt(position, {
-            type: 'docParagraph',
-            content: [{ type: 'text', text: content }],
-          })
-          if (!inserted)
-            return { ok: false, changed: 0, description: 'The content could not be inserted.' }
-          dirtyRef.current = true
-          return { ok: true, changed: 1, description: 'Inserted content into the document.' }
-        }
-        const find =
-          typeof command.find === 'string'
-            ? command.find
-            : typeof command.query === 'string'
-              ? command.query
-              : ''
-        if (!find && kind !== 'format')
-          return { ok: false, changed: 0, description: 'Provide find/query text.' }
-        const replace =
-          typeof command.replace === 'string'
-            ? command.replace
-            : typeof command.text === 'string'
-              ? command.text
-              : ''
-        const requestedIds = Array.isArray(command.blockIds)
-          ? command.blockIds.filter((value): value is string => typeof value === 'string')
-          : []
-        const blockIndexes: number[] = []
-        if (requestedIds.length > 0) {
-          editor.state.doc.forEach((node, _offset, index) => {
-            const rawDocxIndex = node.attrs?.docxIndex
-            const docxIndex =
-              typeof rawDocxIndex === 'number' && Number.isInteger(rawDocxIndex)
-                ? rawDocxIndex
-                : null
-            const id = docxIndex === null ? `live-block-${index}` : `block-${docxIndex}`
-            if (
-              requestedIds.includes(id) &&
-              ['docParagraph', 'docHeading', 'docListItem'].includes(node.type.name)
-            )
-              blockIndexes.push(index)
-          })
-          if (blockIndexes.length !== new Set(requestedIds).size)
-            return { ok: false, changed: 0, description: 'No matching document blocks.' }
-        }
-        const target = blockIndexes.length > 0 ? { blockIndexes } : undefined
-        const revision = editor.storage.trackChanges?.enabled
-          ? { track: { author: aiRevisionAuthor() } }
-          : undefined
-        if (kind === 'format' && target) {
-          const commands: AiCommand[] = []
-          if (command.headingLevel !== undefined)
-            commands.push({
-              setHeadingLevel: { target, level: command.headingLevel as 0 | 1 | 2 | 3 | 4 | 5 | 6 },
-            })
-          const style = docxRunStyle(command)
-          if (Object.keys(style).length)
-            commands.push({
-              updateTextStyle: {
-                target,
-                style,
-                fields: Object.keys(style) as (keyof typeof style)[],
-              },
-            })
-          const result = executeCommands(editor, { commands }, revision)
-          const changed = result.results.reduce((sum, item) => sum + item.changed, 0)
-          if (changed > 0) dirtyRef.current = true
-          return { ok: result.ok, changed, description: result.error ?? result.summary }
-        }
-        const outcome = executeCommands(editor, {
-          commands: [
-            {
-              replaceAllText: {
-                containsText: find,
-                replaceText: replace,
-                ...(target ? { target } : {}),
-                ...(command.matchCase === false ? { matchCase: false } : {}),
-              },
-            },
-          ],
-        }, revision)
-        if (!outcome.ok)
-          return { ok: false, changed: 0, description: outcome.error ?? 'The edit failed.' }
-        const changed = outcome.results.reduce((total, result) => total + result.changed, 0)
-        if (changed > 0) dirtyRef.current = true
-        return {
-          ok: changed > 0,
-          changed,
-          description: changed > 0 ? outcome.summary : 'No matching document text.',
-        }
+        if (invalid) return { ok: false, changed: 0, effect: 'not_applied', description: invalid }
+        const native =
+          command.kind === 'word_tool' ? command : workspaceWordCommand(editor, command)
+        if (typeof native === 'string')
+          return { ok: false, changed: 0, description: native, effect: 'not_applied' }
+        return workspaceWordOperation(editor, native).then((result) => {
+          if (result.changed > 0) dirtyRef.current = true
+          if (command.kind === 'replace_text' && result.ok && !result.changed)
+            return { ...result, ok: false, description: 'No matching document text.' }
+          return result
+        })
       },
       review: async (command: Record<string, unknown>) => {
         const kind = typeof command.kind === 'string' ? command.kind : ''
-        const expectedPath = typeof command.path === 'string' ? command.path.replaceAll('\\', '/') : ''
+        const expectedPath =
+          typeof command.path === 'string' ? command.path.replaceAll('\\', '/') : ''
         const loaded = fileCtxRef.current.doc
         const matches = !!expectedPath && loaded?.filePath?.replaceAll('\\', '/') === expectedPath
         if (kind === 'show_round_review') {
@@ -2919,7 +2813,8 @@ export function App() {
         return { ok: false, error: `Unsupported review operation: ${kind}` }
       },
       save: async () => ({ ok: await save(false, true) }),
-      snapshot: () => editor.getJSON(),
+      cancelWord: (id: string) => cancelWorkspaceWord(editor, id),
+      snapshot: () => wordSnapshot(editor),
       taskDirty: () => dirtyRef.current,
       undo: () => {
         const changed = editor.commands.undo()
@@ -2934,6 +2829,9 @@ export function App() {
       restoreAgentRun: (snapshot: unknown, expected?: unknown) => {
         if (!snapshot || typeof snapshot !== 'object')
           return { ok: false, error: 'The Workspace Agent snapshot is invalid.' }
+        const parts = (snapshot as { wordParts?: unknown }).wordParts
+        if (parts && JSON.stringify(parts) !== JSON.stringify(wordSnapshot(editor).wordParts))
+          return { ok: false, error: 'Word parts changed since the snapshot.' }
         const head = expected === undefined ? undefined : editor.schema.nodeFromJSON(expected)
         if (!restoreAgentRound(editor, snapshot as PmNode, head))
           return { ok: false, error: 'The Word document has newer edits or is read-only.' }
@@ -2946,8 +2844,10 @@ export function App() {
         const value = Reflect.get(object, key, receiver)
         return typeof value === 'function'
           ? (...args: unknown[]) => {
-              assertFullContent()
-              assertNoDocumentDraft(editor)
+              if (key !== 'cancelWord') {
+                assertFullContent()
+                assertNoDocumentDraft(editor)
+              }
               return value.apply(object, args)
             }
           : value
@@ -7694,6 +7594,7 @@ export function App() {
           for (const s of ctx.doc?.parsed.styles.values() ?? []) {
             if (s.linkedCharShell) continue
             out.set(s.styleId, {
+              properties: observedStyleProperties(s),
               styleId: s.styleId,
               name: s.name,
               type: s.type,
@@ -7707,6 +7608,7 @@ export function App() {
             const cur = out.get(up.styleId)
             const headingLevel = pendingHeadingLevel(up.styleId, (id) => upserts[id], parsed)
             out.set(up.styleId, {
+              properties: { ...cur?.properties, ...patchProperties(up) },
               styleId: up.styleId,
               name: up.name ?? cur?.name ?? up.styleId,
               type: cur?.type ?? up.type ?? 'paragraph',

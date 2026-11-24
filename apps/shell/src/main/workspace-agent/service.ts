@@ -21,6 +21,7 @@ import type {
 } from '../../shared/assistant-task-api'
 import {
   observeTaskDocument,
+  nextRoundVersion,
   sameTaskTarget,
   type DocumentObservation,
 } from '../agent-tasks/document-observation'
@@ -178,6 +179,15 @@ import { DeepSeekHarnessAdapter } from './deepseek-harness-adapter'
 import type { RuntimeProvider } from '../../shared/runtime-provider-api'
 import { HarnessEventLog } from './event-log'
 import { retryAtomicRename } from './atomic-rename'
+import {
+  WORD_OPERATIONS,
+  isRoundWordEdit,
+  editorToolCapability,
+  isObservation,
+  recoveryForCapability,
+  explicitlyRequestsSave,
+} from '@genoffice/agent-core'
+import type { WordFileExecutor } from './word-file'
 import { HarnessToolRegistry, validateToolInput } from './tool-registry'
 import {
   CELL_VALUE_SCHEMA,
@@ -192,6 +202,7 @@ import {
   definitionsForProfile,
   permissionForWorkspaceTool,
   workspaceToolDescriptor,
+  workspaceCallCapability,
   workspaceToolPolicy,
   workspaceHarnessGuide,
 } from './tool-catalog'
@@ -305,8 +316,7 @@ function chineseWorkspaceLanguage(language: string | undefined): boolean {
 function localizeWorkspaceAgentText(text: string, language: string | undefined): string {
   if (!chineseWorkspaceLanguage(language)) return text
   const exact: Record<string, string> = {
-    task_effect_requires_review:
-      '上一步操作的结果需要核对，请在工作记录中确认后再继续，避免重复执行。',
+    task_effect_requires_review: '请核对本对话中上一步操作的结果，然后继续。',
     'Run Windows shell command': '运行 Windows Shell 命令',
     'Run workspace command': '运行工作区命令',
     'Confirm destructive action': '确认破坏性操作',
@@ -682,11 +692,32 @@ function toolCheckpointPath(call: AgentToolCall): string {
 
 // Ordinary edits with recoverable checkpoints and their corresponding saves.
 const ROUND_DOCUMENT_TOOLS = new Set([
-  'docx.edit', 'docx.format', 'docx.insert_content', 'docx.save',
-  'xlsx.write_range', 'xlsx.set_formula', 'xlsx.format_range', 'xlsx.save',
-  'pptx.edit', 'pptx.save', 'pdf.annotate',
-  'md.edit', 'md.insert', 'md.save', 'office.save',
+  'docx.edit',
+  'docx.format',
+  'docx.insert_content',
+  'docx.save',
+  'docx.call',
+  'xlsx.write_range',
+  'xlsx.set_formula',
+  'xlsx.format_range',
+  'xlsx.save',
+  'pptx.edit',
+  'pptx.save',
+  'pdf.annotate',
+  'md.edit',
+  'md.insert',
+  'md.save',
+  'office.save',
 ])
+
+function roundDocumentCall(call: AgentToolCall): boolean {
+  if (call.name === 'docx.call')
+    return isRoundWordEdit({
+      name: String(call.input.name),
+      input: (call.input.args ?? {}) as Record<string, unknown>,
+    })
+  return ROUND_DOCUMENT_TOOLS.has(call.name)
+}
 
 const DEFAULT_WORKSPACE_COMMANDS = new Set([
   'cmd',
@@ -1485,6 +1516,8 @@ export interface MutationResult {
   ok: boolean
   changed: number
   description: string
+  effect?: ToolExecution['effect']
+  wordPart?: ToolExecution['wordPart']
 }
 
 /**
@@ -1501,7 +1534,7 @@ export interface DocumentSession {
   inspect(): Promise<DocumentSummary>
   search(query: string): Promise<WorkspaceSearchResult[]>
   read(request?: DocumentReadRequest): Promise<WorkspaceFileContent>
-  mutate(command: DocumentCommand): Promise<MutationResult>
+  mutate(command: DocumentCommand, signal?: AbortSignal): Promise<MutationResult>
   save(): Promise<void>
   snapshot(): Promise<DocumentSnapshot>
   /** Materialize the current session, including unsaved live-editor changes. */
@@ -1552,6 +1585,7 @@ export interface LiveDocumentAdapter {
   search(query: string): Promise<WorkspaceSearchResult[]>
   read(request?: DocumentReadRequest): Promise<WorkspaceFileContent>
   mutate(command: DocumentCommand): Promise<MutationResult>
+  cancelWord?(id: string): Promise<void>
   /** Compare the captured model and dispatch the mutation in the same renderer operation. */
   mutateGuarded?(
     command: DocumentCommand,
@@ -2246,6 +2280,7 @@ export class HeadlessDocumentSession {
       root: string
       displayPath?(path: string): string
       onChanged?(path: string, changed: boolean): void
+      wordFiles?: WordFileExecutor
       xlsxEdit?: XlsxHeadlessEdit
       /** Guard writes when the same path is owned by a live editor session. */
       assertWritable?(
@@ -2705,6 +2740,19 @@ export class HeadlessDocumentSession {
   }
 
   private async mutateUnlocked(command: DocumentCommand): Promise<MutationResult> {
+    if (
+      command.kind === 'word_tool' &&
+      (command.name === 'guide' ||
+        isObservation(
+          editorToolCapability(
+            { name: String(command.name), input: (command.args ?? {}) as Record<string, unknown> },
+            'docs',
+          ),
+        ))
+    ) {
+      await this.load()
+      return this.runWordTool(command)
+    }
     await this.options.assertWritable?.(this.path, 'mutate')
     await this.load()
     await this.assertUnchangedOnDisk()
@@ -2727,11 +2775,53 @@ export class HeadlessDocumentSession {
     }
   }
 
+  private async runWordTool(command: DocumentCommand): Promise<MutationResult> {
+    const invalid = documentCommandError(this.type, command)
+    if (invalid || !this.options.wordFiles)
+      return {
+        ok: false,
+        changed: 0,
+        effect: 'not_applied',
+        description: invalid ?? 'Word file worker unavailable.',
+      }
+    try {
+      const { result, bytes } = await this.options.wordFiles.execute(
+        this.bytes,
+        String(command.name),
+        command.args as Record<string, unknown>,
+        command.signal as AbortSignal | undefined,
+      )
+      if (bytes) {
+        const parsed = await parseDocx(bytes)
+        this.undoBytes = this.bytes
+        this.bytes = new Uint8Array(bytes)
+        this.docx = parsed
+        this.changed = true
+        this.options.onChanged?.(this.path, true)
+      }
+      return {
+        ok: !result.isError,
+        changed: bytes ? 1 : 0,
+        description: result.output,
+        effect: result.effect ?? 'not_applied',
+        wordPart: result.wordPart,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        changed: 0,
+        effect: 'not_applied',
+        description: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
   private async mutateLoaded(command: DocumentCommand): Promise<MutationResult> {
     const invalid = documentCommandError(this.type, command)
     if (invalid) return { ok: false, changed: 0, description: invalid }
     const kind = stringInput(command, 'kind', stringInput(command, 'operation', 'replace_text'))
     if (this.type === 'docx' && this.docx) {
+      if (kind === 'word_tool') return this.runWordTool(command)
       if (kind === 'format') {
         const ids = command.blockIds as string[]
         const targets = this.docx.blocks
@@ -3361,11 +3451,20 @@ export class LiveDocumentSession implements DocumentSession {
     return { ...content, path: this.displayPath(), type: this.type }
   }
 
-  async mutate(command: DocumentCommand): Promise<MutationResult> {
+  async mutate(command: DocumentCommand, signal?: AbortSignal): Promise<MutationResult> {
     return withDocumentOperationLock(this.path, async () => {
-      const result = await this.adapter.mutate(command)
-      if (result.ok && result.changed > 0) this.options.onChanged?.(this.path, true)
-      return result
+      signal?.throwIfAborted()
+      const abort = () => {
+        void this.adapter.cancelWord?.(String(command.runId)).catch(() => {})
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+      try {
+        const result = await this.adapter.mutate(command)
+        if (result.ok && result.changed > 0) this.options.onChanged?.(this.path, true)
+        return result
+      } finally {
+        signal?.removeEventListener('abort', abort)
+      }
     })
   }
 
@@ -3501,6 +3600,7 @@ export class DocumentSessionManager {
       assertDocument?(path: string): void
       onChanged?(path: string, changed: boolean): void
       displayPath?(path: string): string
+      wordFiles?: WordFileExecutor
       xlsxEdit?: XlsxHeadlessEdit
       isFileOpen?(path: string): boolean
       isFileDirty?(path: string): boolean
@@ -3575,6 +3675,7 @@ export class DocumentSessionManager {
       root: this.workspace.root,
       displayPath: (value) => this.workspace.displayPath(value),
       onChanged: this.options.onChanged,
+      wordFiles: this.options.wordFiles,
       xlsxEdit: this.options.xlsxEdit,
       assertWritable: this.options.assertWritable,
     })
@@ -3620,6 +3721,7 @@ export class DocumentSessionManager {
 }
 
 export interface WorkspaceAgentRuntimeOptions {
+  wordFiles?: WordFileExecutor
   locations?: WorkspaceLocationCatalog
   environment?(): EnvironmentService
   computerUse?(): ComputerUseService
@@ -3917,7 +4019,7 @@ interface RuntimeSession {
   complete: ((result: { cancelled: boolean; error?: string }) => void) | null
   /** Session transcript writes are serialized to prevent stale snapshots. */
   persistQueue: Promise<void>
-  lastTextLength: number
+  lastText: string
   displayPendingMessage?: { text: string; preceding: unknown }
   nextEventSequence: number
   deleted: boolean
@@ -4179,8 +4281,28 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
   }),
   toolDef(
     'docx.create',
-    'Create a new DOCX through the BigDogOffice document engine. Use a new output path and optionally provide initial text.',
-    { path: { type: 'string' }, text: { type: 'string' }, content: { type: 'string' } },
+    'Create and save a new Word file. Supply markdown for headings, paragraphs, lists and tables, or html for a restricted Word fragment.',
+    {
+      path: { type: 'string' },
+      markdown: { type: 'string' },
+      html: { type: 'string' },
+      text: { type: 'string' },
+      content: { type: 'string' },
+    },
+  ),
+  toolDef(
+    'docx.tools',
+    'Read the native Word operation schemas and editing guide for this file. Use before docx.call for rich documents, tables, selection, formatting or Word parts.',
+    { path: { type: 'string' } },
+  ),
+  toolDef(
+    'docx.call',
+    'Perform a native Word operation from docx.tools on this document. Pass its exact name and input object. Inspect the relevant document part after editing, and use office.save to persist changes.',
+    {
+      path: { type: 'string' },
+      name: { type: 'string', enum: [...WORD_OPERATIONS] },
+      args: { type: 'object' },
+    },
   ),
   toolDef('docx.inspect', 'Inspect a DOCX outline and block skeleton.', {
     path: { type: 'string' },
@@ -4653,8 +4775,9 @@ function documentReadOutput(content: WorkspaceFileContent): string {
 function permissionLevelForTool(
   name: string,
   approvalMode: AgentApprovalMode | 'legacy',
+  input?: Record<string, unknown>,
 ): ToolPermissionLevel | null {
-  return permissionForWorkspaceTool(WORKSPACE_TOOL_CATALOG, name, approvalMode)
+  return permissionForWorkspaceTool(WORKSPACE_TOOL_CATALOG, name, approvalMode, input)
 }
 
 function configuredApprovalMode(
@@ -5298,6 +5421,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
     return new HeadlessDocumentSession(path, {
       root,
       displayPath,
+      wordFiles: this.options.wordFiles,
       xlsxEdit:
         this.options.xlsxEdit ??
         ((filePath, command, sourceBytes) =>
@@ -5885,7 +6009,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
   private async prepareRunTool(runtime: RuntimeSession, call: AgentToolCall): Promise<void> {
     const active = runtime.activeAgentRun
     const descriptor = workspaceToolDescriptor(WORKSPACE_TOOL_CATALOG, call.name)
-    if (!active || !descriptor || descriptor.access === 'read') return
+    if (!active || !descriptor || isObservation(workspaceCallCapability(call, descriptor))) return
     const requestedPath = toolCheckpointPath(call)
     if (!requestedPath) return
     const full = await runtime.workspace.resolvePath(requestedPath)
@@ -5973,8 +6097,11 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
   ): Promise<void> {
     const active = runtime.activeAgentRun
     const descriptor = workspaceToolDescriptor(WORKSPACE_TOOL_CATALOG, call.name)
-    if (!active || !descriptor || descriptor.access === 'read') return
-    if (execution.isError) active.failed = true
+    if (!active || !descriptor || isObservation(workspaceCallCapability(call, descriptor))) return
+    const failedEffect =
+      execution.isError &&
+      (execution.effect !== 'not_applied' || execution.denied || call.name.endsWith('.save'))
+    if (failedEffect) active.failed = true
     const requestedPath = toolCheckpointPath(call)
     const path = requestedPath
       ? this.checkpointPath(runtime, await runtime.workspace.resolvePath(requestedPath))
@@ -5985,15 +6112,39 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
       const key = pathIdentity(await runtime.workspace.resolvePath(requestedPath))
       const previous = active.approvedDocuments.get(key)
       if (previous) {
-        const next = !execution.isError && ROUND_DOCUMENT_TOOLS.has(call.name) && !call.name.endsWith('.save')
-          ? await this.documentRoundHead(runtime, requestedPath)
-          : undefined
-        if (next && next.diskDigest === previous.diskDigest && next.fileIdentity === previous.fileIdentity)
-          active.approvedDocuments.set(key, next)
+        const next =
+          (!execution.isError || execution.effect === 'not_applied') &&
+          roundDocumentCall(call) &&
+          call.input.name !== 'write_document' &&
+          !call.name.endsWith('.save')
+            ? await this.documentRoundHead(runtime, requestedPath)
+            : undefined
+        const updated = nextRoundVersion(previous, next)
+        if (updated) active.approvedDocuments.set(key, updated)
         else active.approvedDocuments.delete(key)
       }
     }
-    if (execution.isError) {
+    if (
+      checkpoint.live &&
+      call.name === 'docx.call' &&
+      execution.effect === 'applied' &&
+      [
+        'set_header_footer',
+        'define_style',
+        'set_page_setup',
+        'insert_section_break',
+        'add_comment',
+        'reply_comment',
+        'resolve_comment',
+        'delete_comment',
+        'insert_footnote',
+        'insert_endnote',
+        'edit_note',
+        'delete_note',
+      ].includes(String(call.input.name))
+    )
+      checkpoint.undoable = false // The native body rollback cannot restore separate Word parts.
+    if (failedEffect) {
       checkpoint.failed = true
       if (call.name.endsWith('.save')) checkpoint.saveFailed = true
     }
@@ -7067,6 +7218,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
       assertDocument: (path) => {
         if (runtime.boundDocument?.matches(path)) runtime.boundDocument.assertAvailable()
       },
+      wordFiles: this.options.wordFiles,
       xlsxEdit:
         this.options.xlsxEdit ??
         ((path, command, sourceBytes) =>
@@ -7124,7 +7276,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
       pendingSteer: null,
       complete: null,
       persistQueue: Promise.resolve(),
-      lastTextLength: 0,
+      lastText: '',
       nextEventSequence: eventLog.lastSequence,
       deleted: false,
       eventLog,
@@ -7363,12 +7515,17 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
         )
           return `${call.name} does not match the resolved document type (${actual}).`
       }
-      const level = permissionLevelForTool(call.name, configuredApprovalMode(this.options))
+      const level = permissionLevelForTool(
+        call.name,
+        configuredApprovalMode(this.options),
+        call.input,
+      )
       if (!level) return
       const active = runtime.activeAgentRun
-      const head = level === 'write' && requestedPath && ROUND_DOCUMENT_TOOLS.has(call.name)
-        ? await this.documentRoundHead(runtime, requestedPath)
-        : undefined
+      const head =
+        level === 'write' && requestedPath && roundDocumentCall(call)
+          ? await this.documentRoundHead(runtime, requestedPath)
+          : undefined
       const key = head && pathIdentity(head.path)
       const prior = key && active?.approvedDocuments.get(key)
       if (prior && head && sameTaskTarget(prior, head)) return
@@ -7446,6 +7603,11 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
           : this.options.managedSessions
             ? 'Mutation paths must stay inside the workspace root. Explicitly selected context files may be read only through context.read_file; starred knowledge files through knowledge.read. Neither grants external write access.'
             : 'All paths are workspace-relative. Never request parent paths or access files outside the root.',
+        ...(exposedTools.some((tool) => tool.name === 'docx.call')
+          ? [
+              'For Word editing, use docx.tools for the current document, then invoke its native operations with docx.call. The returned Word guide owns selection, local rewrites and structural editing rules.',
+            ]
+          : []),
         'Use document tools for Office files; do not manipulate OOXML or binary packages directly.',
         'After mutations, save explicitly, verify the result when possible, and finish with a concise outcome plus changed files.',
         ...(exposedTools.some((tool) => tool.name === 'agent.update_plan')
@@ -7472,6 +7634,27 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
           : []),
       ].join('\n'),
       buildContext: () => runtime.referenceContext,
+      checkSaved: async (instruction) => {
+        if (!explicitlyRequestsSave(instruction)) return undefined
+        const edits = [...(runtime.activeAgentRun?.checkpoints.values() ?? [])].filter(
+          (checkpoint) =>
+            checkpoint.mutationCount || checkpoint.tools.some((name) => name.endsWith('.save')),
+        )
+        if (!edits.length) return false
+        for (const edit of edits) {
+          if (!edit.savedDiskHash || !edit.savedModelHash) return false
+          const session = await runtime.documents.open(edit.path)
+          const disk = await readFile(await runtime.workspace.resolvePath(edit.path))
+          const snapshot = await session.snapshot()
+          if (
+            session.dirty ||
+            edit.savedDiskHash !== bytesFingerprint(disk) ||
+            edit.savedModelHash !== bytesFingerprint(Buffer.from(snapshot.bytesBase64, 'base64'))
+          )
+            return false
+        }
+        return true
+      },
       verifyResponse: (_text, calls) => {
         // A refusal or failed save is a blocker, not permission to try again
         // through a correction turn or another save alias.
@@ -7543,18 +7726,18 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
         onTurnStart: () => {
           runtime.turnNumber += 1
           runtime.stepNumber = 0
-          runtime.lastTextLength = 0
+          runtime.lastText = ''
           runtime.displayPendingMessage = undefined
           if (!runtime.deleted) this.emit(runtime, { type: 'agent.status', status: 'running' })
         },
         onText: (text) => {
           if (runtime.deleted) return
           runtime.displayPendingMessage = { text, preceding: runtime.loop.messages.at(-1) }
-          const previous = runtime.lastTextLength ?? 0
-          const delta = text.slice(previous)
-          runtime.lastTextLength = text.length
-          if (delta)
-            this.emit(runtime, { type: 'assistant.message', role: 'assistant', text: delta })
+          const previous = runtime.lastText
+          runtime.lastText = text
+          const replaceText = !text.startsWith(previous)
+          const delta = replaceText ? text : text.slice(previous.length)
+          if (delta || replaceText) this.emit(runtime, {type:'assistant.message',role:'assistant',text:delta,...(replaceText ? {replaceText:true} : {})})
         },
         onReasoning: (text) => {
           if (!runtime.deleted) this.emit(runtime, { type: 'assistant.reasoning_summary', text })
@@ -7572,7 +7755,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
               summary: toolCallPreview(call),
             },
           })
-          runtime.lastTextLength = 0
+          runtime.lastText = ''
         },
         onToolExecuted: ({ call, execution }) => {
           if (runtime.deleted) return
@@ -8259,7 +8442,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
           call.name.startsWith('knowledge.')
         )
           return 'repeat_read'
-        return toolCheckpointPath(call) && descriptor ? 'verify_effect' : 'user_reconcile'
+        return recoveryForCapability(workspaceCallCapability(call, descriptor))
       },
       observe: async (call) => {
         const path = call ? toolCheckpointPath(call) : document?.path
@@ -8417,7 +8600,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
     runtime.turnNumber = 0
     runtime.stepNumber = 0
     runtime.stepIds.clear()
-    runtime.lastTextLength = 0
+    runtime.lastText = ''
     const prepareTimer = setTimeout(() => {
       preflight.abort(new Error('Workspace reference preparation timed out.'))
     }, 30_000)
@@ -8828,11 +9011,16 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
         case 'md.insert': {
           const session = await runtime.documents.open(path)
           const kind = call.name === 'md.insert' ? 'insert' : 'replace_text'
-          const result = await session.mutate({ ...input, kind })
+          const result = await session.mutate({
+            ...input,
+            kind,
+            ...(session.type === 'docx' ? { runId: runtime.activeRunId } : {}),
+          })
           return {
             output: JSON.stringify(result),
             summary: result.description,
             mutated: result.ok && result.changed > 0,
+            ...(result.effect ? { effect: result.effect } : {}),
             isError: !result.ok,
           }
         }
@@ -8903,13 +9091,54 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
           } catch (error) {
             if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
           }
-          await writeNewFile(target, await createDocxBytes(input))
+          const sources = ['html', 'markdown', 'text', 'content'].filter(
+            (key) => typeof input[key] === 'string',
+          )
+          if (sources.length > 1) throw new Error('Supply one Word content field.')
+          const source = sources[0]
+          const content = source ? String(input[source]) : ''
+          if (content && (source === 'html' || source === 'markdown') && !this.options.wordFiles)
+            throw new Error('Structured Word creation requires the Word file worker.')
+          const bytes =
+            content && this.options.wordFiles
+              ? await this.options.wordFiles.create(
+                  content,
+                  source === 'html' ? 'html' : 'md',
+                  signal,
+                )
+              : await createDocxBytes(input)
+          await writeNewFile(target, bytes)
           const outputPath = runtime.workspace.displayPath(target)
           this.emit(runtime, {
             type: 'document.created',
             file: { path: outputPath, type: 'docx', operation: 'created' },
           })
           return { output: `Created ${outputPath}`, summary: `Create ${outputPath}`, mutated: true }
+        }
+        case 'docx.tools':
+        case 'docx.call': {
+          const session = await runtime.documents.open(path)
+          const result = await session.mutate(
+            {
+              kind: 'word_tool',
+              runId: runtime.activeRunId ?? runtime.record.id,
+              name: call.name === 'docx.tools' ? 'guide' : input.name,
+              args: input.args ?? {},
+              instruction: runtime.pendingInput ?? '',
+              ...(session instanceof HeadlessDocumentSession ? { signal } : {}),
+            },
+            signal,
+          )
+          return {
+            output: result.description,
+            summary: String(input.name ?? 'Word tools'),
+            isError: !result.ok,
+            mutated: result.changed > 0,
+            ...(result.wordPart ? { wordPart: { ...result.wordPart, path: session.path } } : {}),
+            effect:
+              result.effect ??
+              (result.ok ? (result.changed ? 'applied' : 'not_applied') : 'unknown'),
+          }
         }
         case 'docx.read':
         case 'docx.read_blocks': {
@@ -9031,6 +9260,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
             output: JSON.stringify(result),
             summary: result.description,
             mutated: result.ok && result.changed > 0,
+            ...(result.effect ? { effect: result.effect } : {}),
             isError: !result.ok,
           }
         }
@@ -9194,11 +9424,17 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
         case 'docx.insert_content': {
           const session = await runtime.documents.open(path)
           const content = stringInput(input, 'content', stringInput(input, 'text'))
-          const result = await session.mutate({ ...input, text: content, kind: 'insert_content' })
+          const result = await session.mutate({
+            ...input,
+            text: content,
+            kind: 'insert_content',
+            runId: runtime.activeRunId,
+          })
           return {
             output: JSON.stringify(result),
             summary: result.description,
             mutated: result.ok && result.changed > 0,
+            ...(result.effect ? { effect: result.effect } : {}),
             isError: !result.ok,
           }
         }
@@ -9232,11 +9468,16 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
             : call.name === 'docx.format'
               ? 'format'
               : (input.kind ?? 'replace_text')
-          const result = await session.mutate({ ...input, kind })
+          const result = await session.mutate({
+            ...input,
+            kind,
+            ...(session.type === 'docx' ? { runId: runtime.activeRunId } : {}),
+          })
           return {
             output: JSON.stringify(result),
             summary: result.description,
             mutated: result.ok && result.changed > 0,
+            ...(result.effect ? { effect: result.effect } : {}),
             isError: !result.ok,
           }
         }
@@ -9279,6 +9520,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
             output: JSON.stringify(result),
             summary: result.description,
             mutated: result.ok && result.changed > 0,
+            ...(result.effect ? { effect: result.effect } : {}),
             isError: !result.ok,
           }
         }

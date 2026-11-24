@@ -2,6 +2,7 @@ import { withAttachedSkills } from '@genoffice/agent-core'
 import type { SessionContextSelection } from '@genoffice/project-store'
 import { ConversationContextPanel } from './ConversationContextPanel'
 import { RunReviewCard } from './RunReviewCard'
+import { AssistantTaskShelf } from './AssistantTaskShelf'
 import { ConversationRecords } from './ConversationRecords'
 import { WorkspaceToolSteps } from './WorkspaceToolSteps'
 import {
@@ -2507,6 +2508,14 @@ export function WorkspaceChat({
                   )
                 }
               })}
+              {activeSessionId && (
+                <AssistantTaskShelf
+                  key={activeSessionId}
+                  lang={lang}
+                  sessionId={activeSessionId}
+                  onOpenFile={(path) => void openFile(path)}
+                />
+              )}
             </div>
             {error && (
               <div className="workspace-chat-error" role="alert">
@@ -2684,7 +2693,9 @@ export function WorkspaceChat({
                         disabled={running || attachingFiles || contextSaving}
                         aria-label={`${isChineseWorkspaceLanguage(lang) ? '移除引用' : 'Remove reference'} ${file.name}`}
                         onClick={() =>
-                          void removeReference(file.path).catch((cause) => setError(displayError(cause)))
+                          void removeReference(file.path).catch((cause) =>
+                            setError(displayError(cause)),
+                          )
                         }
                       >
                         ×
@@ -2746,7 +2757,8 @@ export function WorkspaceChat({
                     {zh ? '文件与记忆' : 'Files & memory'}
                     {referenceFiles.length > 0 && (
                       <span data-file-count="">
-                        {referenceFiles.length} {zh ? '个文件' : referenceFiles.length === 1 ? 'file' : 'files'}
+                        {referenceFiles.length}{' '}
+                        {zh ? '个文件' : referenceFiles.length === 1 ? 'file' : 'files'}
                       </span>
                     )}
                     <svg

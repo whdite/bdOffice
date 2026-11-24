@@ -195,8 +195,8 @@ function reduceTimelineEventBase(
   state: WorkspaceChatTimelineState,
   event: WorkspaceAgentEvent,
 ): WorkspaceChatTimelineState {
-  if (event.type === 'assistant.message' && event.text) {
-    if (event.role === 'user') {
+  if (event.type === 'assistant.message' && (event.text || event.replaceText)) {
+    if (event.role === 'user' && event.text) {
       return {
         items: [
           ...state.items,
@@ -212,11 +212,16 @@ function reduceTimelineEventBase(
       const current = state.items[index]
       if (index >= 0 && current?.kind === 'message' && current.role === 'assistant') {
         const items = [...state.items]
-        items[index] = { ...current, text: `${current.text}${event.text}` }
+        if (event.replaceText && !event.text) {
+          items.splice(index,1)
+          return {items,activeAssistantId:null,activeReasoningId:null}
+        }
+        items[index] = { ...current, text: event.replaceText ? event.text ?? '' : `${current.text}${event.text}` }
         return { items, activeAssistantId: current.id, activeReasoningId: null }
       }
     }
 
+    if (!event.text) return state
     const id = `message-${event.id}`
     return {
       items: [...state.items, { kind: 'message', id, role: 'assistant', text: event.text }],

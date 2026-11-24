@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { BIGDOG_RELEASES_URL } from '../shared/bigdog-release'
+import { BIGDOG_RELEASES_URL, bigDogReleasePage, type BigDogReleaseStatus } from '../shared/bigdog-release'
 import path from 'node:path'
 import { app, dialog, shell } from 'electron'
 import type { BrowserWindow } from 'electron'
@@ -562,7 +562,9 @@ export function applyUpdateChannel(channel: UpdateChannel): void {
  * up-to-date and failure each get a dialog, and installs with no self-update
  * mechanism (dev runs, Linux .deb) are pointed at the download page instead
  * of being told they're current. */
-export async function checkForUpdatesNow(): Promise<void> {
+export async function checkForUpdatesNow(
+  publicCheck?: () => Promise<BigDogReleaseStatus>,
+): Promise<void> {
   if (manualCheckInFlight) return
   manualCheckInFlight = true
   try {
@@ -572,15 +574,31 @@ export async function checkForUpdatesNow(): Promise<void> {
       return
     }
     if (!updaterActive) {
+      const status = await publicCheck?.().catch((): BigDogReleaseStatus => ({ phase: 'error' }))
+      if (status?.phase === 'current') {
+        await dialog.showMessageBox({
+          type: 'info',
+          title: tUpd(lang, 'updTitle'),
+          message: tUpd(lang, 'updUpToDate', { version: app.getVersion() }),
+          buttons: ['OK'],
+        })
+        return
+      }
       const { response } = await dialog.showMessageBox({
-        type: 'info',
+        type: status?.phase === 'error' ? 'warning' : 'info',
         title: tUpd(lang, 'updTitle'),
-        message: tUpd(lang, 'updManual'),
+        message:
+          status?.phase === 'available'
+            ? `${tUpd(lang, 'updHeadline')} · ${status.version}`
+            : tUpd(lang, status?.phase === 'error' ? 'updCheckFailed' : 'updManual'),
         buttons: ['OK', tUpd(lang, 'updOpenDownload')],
         defaultId: 0,
         cancelId: 0,
       })
-      if (response === 1) void shell.openExternal(DOWNLOAD_PAGE_URL)
+      if (response === 1)
+        void shell.openExternal(
+          bigDogReleasePage(status?.phase === 'available' ? status.version : undefined),
+        )
       return
     }
     dismissedVersion = null

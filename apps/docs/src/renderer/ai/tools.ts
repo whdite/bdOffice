@@ -1,4 +1,5 @@
 import type { Editor } from '@tiptap/core'
+import { stylePartValues, patchProperties } from './style-ops'
 import { assertFullContent } from '../phased-content'
 import { hasDocumentDraft, DRAFT_IO_ERROR } from './draft-state'
 import type { Mark, Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -727,6 +728,10 @@ export interface ToolExecution {
   /** result text fed back to the model */
   output: string
   isError?: boolean
+  savedFile?: { path: string; sha256: string }
+  externalEffect?: import('@genoffice/agent-core').ToolEffect
+  wordPart?: import('@genoffice/agent-core').WordPartEvidence
+  effect?: import('@genoffice/agent-core').ToolEffect
   /** true when the tool changed the document */
   mutated: boolean
   /** short human-readable label for the chat activity chip */
@@ -735,8 +740,13 @@ export interface ToolExecution {
   display?: ToolDisplay
 }
 
-const fail = (summary: string, output: string): ToolExecution => ({
+const fail = (
+  summary: string,
+  output: string,
+  effect: ToolExecution['effect'] = 'not_applied',
+): ToolExecution => ({
   output,
+  effect,
   isError: true,
   mutated: false,
   summary,
@@ -1047,13 +1057,16 @@ async function executeAsyncTool(
         }
       }
       const r = await window.desktop.createDocument({ type, title, content })
-      if (!r.ok) return fail(t('aiSumCreateDocument'), r.error ?? 'creating the document failed')
+      if (!r.ok)
+        return fail(t('aiSumCreateDocument'), r.error ?? 'creating the document failed', 'unknown')
       const name = `${title}.${type}`
       return {
         output: r.path
           ? `Created the new document at ${r.path} and opened it in a new tab.`
           : `Created the new document "${name}" in a new tab; it saves itself into the default folder.`,
         mutated: false,
+        externalEffect: 'applied',
+        ...(r.path && r.sha256 ? { savedFile: { path: r.path, sha256: r.sha256 } } : {}),
         summary: t('aiSumCreatedDocument', { name }),
       }
     }
@@ -1116,6 +1129,7 @@ async function setPictureWatermark(
   if (error) return fail(summary, error)
   return {
     output: `Picture watermark set (${natural.width}x${natural.height}px source).`,
+    effect: 'applied',
     mutated: false, // header part state, written on save
     summary,
   }
@@ -1400,8 +1414,22 @@ function executeSyncTool(
         output: [
           buildDocumentContext(editor, scope ?? undefined, hf?.read()),
           ...(pageSetup ? pageSetupContextLines(pageSetup.list()) : []),
+          ...(extras?.watermark
+            ? [`Watermark: ${extras.watermark.current() ?? '(none or picture)'}`]
+            : []),
         ].join('\n'),
         mutated: false,
+        ...(hf
+          ? {
+              wordPart: {
+                observed: Object.fromEntries(
+                  Object.entries(hf.read())
+                    .filter(([key]) => /^(header|footer)(First|Even)?$/.test(key))
+                    .map(([key, value]) => [key, JSON.stringify(value)]),
+                ),
+              },
+            }
+          : {}),
         summary: t('aiSumReadDocContext'),
       }
 
@@ -1824,6 +1852,7 @@ function executeSyncTool(
       }
       return {
         output: `Comment ${rootId} marked as resolved.`,
+        effect: 'applied',
         mutated: false, // app state only; the document content is untouched
         summary: t('aiSumResolveComment'),
       }
@@ -2006,6 +2035,13 @@ function executeSyncTool(
       if (error) return fail(summaryOf(), error)
       return {
         output: `Updated the ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}.`,
+        wordPart: {
+          expected: {
+            [kind + (view === 'first' ? 'First' : view === 'even' ? 'Even' : '')]:
+              JSON.stringify(text),
+          },
+        },
+        effect: 'applied',
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
       }
@@ -2034,13 +2070,19 @@ function executeSyncTool(
         targets = sections.map((s) => s.index)
       }
       const lines: string[] = []
+      const patches = []
       for (const index of targets) {
         const current = pageSetup.current(index)
         if (!current) return fail(summary, `section ${index} is not available`)
         const resolved = resolvePageSetup(fields, current)
         if ('error' in resolved) return fail(summary, resolved.error)
+        patches.push({ index, resolved })
+      }
+      let applied = false
+      for (const { index, resolved } of patches) {
         const error = pageSetup.set(index, resolved)
-        if (error) return fail(summary, error)
+        if (error) return fail(summary, error, applied ? 'applied' : 'not_applied')
+        applied = true
       }
       for (const s of pageSetup.list()) {
         if (targets.includes(s.index))
@@ -2050,6 +2092,7 @@ function executeSyncTool(
       }
       return {
         output: `Page setup updated.\n${lines.join('\n')}`,
+        effect: 'applied',
         mutated: false, // section settings live beside the document and are written on save
         summary,
       }
@@ -2083,7 +2126,31 @@ function executeSyncTool(
     case 'list_styles': {
       const summary = t('aiSumListStyles')
       if (!extras?.styles) return fail(summary, 'the style catalog is not available here')
-      return { output: describeStyles(extras.styles.list()), mutated: false, summary }
+      const all = extras.styles.list()
+      const selected =
+        typeof call.input.styleId === 'string'
+          ? all.filter((s) => s.styleId === call.input.styleId)
+          : all
+      if (!selected.length && call.input.styleId)
+        return fail(summary, 'Style not found. List styles for current IDs.')
+      const observed = Object.assign(
+        {},
+        ...selected.map((s) =>
+          stylePartValues(s.styleId, {
+            styleId: s.styleId,
+            name: s.name,
+            type: s.type,
+            basedOn: s.basedOn ?? null,
+            ...s.properties,
+          }),
+        ),
+      )
+      return {
+        output: call.input.styleId ? JSON.stringify(selected[0]) : describeStyles(selected),
+        wordPart: { observed },
+        mutated: false,
+        summary,
+      }
     }
 
     case 'define_style': {
@@ -2096,6 +2163,8 @@ function executeSyncTool(
       const { styleId } = resolved.value.upsert
       return {
         output: `${resolved.value.existing ? 'Updated' : 'Created'} style ${styleId}; apply it with the applyStyle op { op: "applyStyle", target, styleId: "${styleId}" }.`,
+        wordPart: { expected: stylePartValues(styleId, patchProperties(resolved.value.upsert)) },
+        effect: 'applied',
         mutated: false, // styles.xml is written on save; the PM doc is untouched
         summary,
       }
@@ -2110,6 +2179,7 @@ function executeSyncTool(
       if (error) return fail(summary, error)
       return {
         output: resolved.spec ? `Watermark set to "${resolved.spec.text}".` : 'Watermark removed.',
+        effect: 'applied',
         mutated: false, // header part state, written on save
         summary,
       }

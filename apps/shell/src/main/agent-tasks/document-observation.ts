@@ -84,7 +84,9 @@ export async function observeTaskDocument(input: {
     snapshot = await live.snapshot()
     version.modelDigest = evidenceSnapshotDigest(snapshot, true)
     version.editorIdentity = editorIdentity
-    version.dirty = !version.exists || dirty === true || (await live.taskDirty?.()) === true
+    // Tab chrome can still show the pre-save flag while the writer has already committed.
+    const liveDirty = await live.taskDirty?.()
+    version.dirty = !version.exists || (liveDirty ?? dirty ?? false)
   }
   return {
     version,
@@ -124,6 +126,40 @@ export function sameTaskTarget(expected: TaskTargetVersion, current: TaskTargetV
     return expected.modelDigest === current.modelDigest
   return true
 }
+/** Advance an attempt-local grant only across its own edits to the same file generation. */
+export function nextRoundVersion(
+  previous: TaskTargetVersion,
+  next?: TaskTargetVersion,
+): TaskTargetVersion | undefined {
+  return next?.complete &&
+    previous.path === next.path &&
+    previous.diskDigest === next.diskDigest &&
+    previous.fileIdentity === next.fileIdentity &&
+    (!previous.editorIdentity || next.editorIdentity === previous.editorIdentity)
+    ? next
+    : undefined
+}
+
+/** Match the host writer's promoted bytes to the file that was read back after a save. */
+export function verifiedWordSave(
+  before: DocumentObservation | undefined,
+  after: DocumentObservation,
+): boolean {
+  const version = after.version
+  if (!version.complete || !version.exists || !version.diskDigest || version.dirty) return false
+  if (after.liveSnapshot) {
+    if (
+      after.witness?.complete &&
+      after.witness.sha256 === version.diskDigest &&
+      after.witness.id !== before?.witness?.id
+    )
+      return true
+    // Saving an already clean, unchanged document can be a no-op.
+    return !!before && !before.version.dirty && sameTaskTarget(before.version, version)
+  }
+  return !before?.version.dirty || before.version.modelDigest === version.diskDigest
+}
+
 export function observedEffect(
   before: DocumentObservation[],
   after: DocumentObservation[],

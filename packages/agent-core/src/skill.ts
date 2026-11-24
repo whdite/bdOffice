@@ -7,6 +7,8 @@ export interface ExecutedToolCall {
   ok: boolean
   /** Actual artifact changes (including a partially failed operation). */
   mutated?: boolean
+  wordPart?: import('./types').WordPartEvidence
+  effect?: import('./tool-capability').ToolEffect
   /** Explicit host denial, never model-supplied authorization. */
   denied?: boolean
 }
@@ -40,6 +42,8 @@ export interface AgentSkill {
    * accept the reply. The loop applies the correction at most once per run,
    * so a detector false-positive costs one extra turn and cannot loop.
    */
+  /** Version-bound persistence check for hosts without a durable task executor. */
+  checkSaved?(instruction: string): Promise<boolean | undefined>
   verifyResponse?(finalText: string, executed: readonly ExecutedToolCall[]): string | null
 }
 

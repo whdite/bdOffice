@@ -1,5 +1,7 @@
+import { extname, isAbsolute } from 'node:path'
+import { saveWitness } from '@genoffice/electron-utils/save-witness'
 import { randomUUID } from 'node:crypto'
-import { sessionBudget } from '@genoffice/agent-core'
+import { isRoundWordEdit, sessionBudget } from '@genoffice/agent-core'
 import type {
   AgentSessionSnapshot,
   AgentTaskExecution,
@@ -20,7 +22,10 @@ import {
 } from '../../shared/assistant-task-api'
 import { AssistantTaskStore, taskHash, type TaskLease, type TaskStepStart } from './assistant-store'
 import {
+  observeTaskDocument,
   observedEffect,
+  verifiedWordSave,
+  nextRoundVersion,
   sameTaskTarget,
   taskFileChanges,
   mergeTaskFileChange,
@@ -400,15 +405,42 @@ export class AssistantTaskService {
     const id = lease.taskId,
       before = new Map<
         string,
-        { values: DocumentObservation[]; call: AgentToolCall; recovery: TaskStepStart['recovery'] }
+        {
+          values: DocumentObservation[]
+          call: AgentToolCall
+          recovery: TaskStepStart['recovery']
+          startedAt: number
+        }
       >()
-    const confirmations = new Map<string, { id: string; digest: string }>()
+    const confirmations = new Map<
+      string,
+      { id: string; digest: string; head?: TaskTargetVersion }
+    >()
+    let roundHead: TaskTargetVersion | undefined
+    const authorizedHeads = new Map<string, TaskTargetVersion>()
     const fileChanges = new Map<string, AgentRunFileChange>()
     const startedAt = new Date().toISOString()
+    const checkSaved = async (): Promise<boolean | undefined> => {
+      if (request.requiredResult !== 'saved_artifact') return undefined
+      const receipts = this.store.saveTargets(id)
+      if (!receipts.length) return false
+      for (const item of receipts) {
+        if (!item.saved) return false
+        const current = await binding.inspectTarget(item.saved).catch(() => undefined)
+        if (!current || current.version.dirty || !sameTaskTarget(item.saved, current.version))
+          return false
+      }
+      return true
+    }
     let finishing: Promise<void> | undefined
     const execution: AgentTaskExecution = {
       taskId: id,
       supportsClarification: true,
+      checkSaved,
+      pendingWordParts: async () =>
+        Object.keys(this.store.plan(id).pendingWordParts ?? {}).map((key) =>
+          (JSON.parse(key) as string[]).filter(Boolean).join(' · '),
+        ),
       start: async (input, signal) => {
         signal.throwIfAborted()
         await this.checkContext(request, id, binding)
@@ -436,6 +468,21 @@ export class AssistantTaskService {
           return
         const digest = operation(call),
           observed = targets(await binding.observe(call))
+        const head =
+          request.entry === 'file' &&
+          observed.length === 1 &&
+          observed[0]?.type === 'docx' &&
+          isRoundWordEdit(call) &&
+          observed[0].complete &&
+          observed[0].exists &&
+          observed[0].diskDigest
+            ? observed[0]
+            : undefined
+        if (head && roundHead && sameTaskTarget(roundHead, head)) {
+          authorizedHeads.set(call.id, head)
+          return { covered: true }
+        }
+        roundHead = undefined
         const confirmation = this.store.requestDecision(
           lease,
           digest,
@@ -444,9 +491,11 @@ export class AssistantTaskService {
           'approval',
           parentCall ? operation(parentCall) : digest,
         )
-        confirmations.set(call.id, { id: confirmation, digest })
+        confirmations.set(call.id, { id: confirmation, digest, ...(head ? { head } : {}) })
+        if (head && call.name !== 'save_document')
+          return { round: { path: head.path, baseVersion: head.modelDigest ?? head.diskDigest! } }
       },
-      afterApproval: async (call, allowed) => {
+      afterApproval: async (call, allowed, round) => {
         const decision = confirmations.get(call.id)
         if (!decision) return
         confirmations.delete(call.id)
@@ -470,6 +519,9 @@ export class AssistantTaskService {
           current,
         )
         if (allowed && !accepted) throw new Error('task_confirmation_stale')
+        if (accepted && decision.head) authorizedHeads.set(call.id, decision.head)
+        if (accepted && round && decision.head && call.name !== 'save_document')
+          roundHead = decision.head
       },
       prepareTool: async (call, signal) => {
         signal.throwIfAborted()
@@ -480,8 +532,13 @@ export class AssistantTaskService {
         // Revalidate only previously observed targets involved in this step.
         const known =
           this.store.plan(id).lastTargets ?? (request.document ? [request.document] : [])
+        const approved = authorizedHeads.get(call.id)
+        authorizedHeads.delete(call.id)
         for (const item of values) {
-          const expected = known.find((value) => value.path === item.version.path)
+          const expected =
+            approved?.path === item.version.path
+              ? approved
+              : known.find((value) => value.path === item.version.path)
           if (expected && !sameTaskTarget(expected, item.version))
             throw new Error('task_context_changed')
         }
@@ -492,7 +549,8 @@ export class AssistantTaskService {
           recovery,
           targets: targets(values),
         })
-        if (!permit.reused) before.set(permit.stepId, { values, call, recovery })
+        if (!permit.reused)
+          before.set(permit.stepId, { values, call, recovery, startedAt: Date.now() })
         return permit
       },
       finishTool: async (permit: TaskToolPermit, result: ToolExecution, snapshot) => {
@@ -517,10 +575,47 @@ export class AssistantTaskService {
             observed = false
           }
         }
+        if (
+          started.call.name === 'create_document' &&
+          result.savedFile &&
+          isAbsolute(result.savedFile.path)
+        ) {
+          const { path, sha256 } = result.savedFile
+          const witness = saveWitness(path)
+          const type = extname(path).slice(1).toLowerCase()
+          if (
+            witness?.complete &&
+            witness.at >= started.startedAt &&
+            witness.sha256 === sha256 &&
+            (type === 'docx' || type === 'pdf' || type === 'html' || type === 'md')
+          ) {
+            const created = await observeTaskDocument({ path, type })
+            if (created.version.complete && created.version.diskDigest === sha256) {
+              created.version.generatedFile = true
+              started.values = []
+              after = [created]
+              observed = true
+            }
+          }
+        }
+        if (roundHead && started.recovery !== 'repeat_read') {
+          const previous = started.values[0]?.version,
+            next = after[0]?.version
+          roundHead =
+            (!result.isError || result.effect === 'not_applied') &&
+            previous &&
+            isRoundWordEdit(started.call) &&
+            sameTaskTarget(roundHead, previous) &&
+            (result.effect !== 'not_applied' || (next && sameTaskTarget(previous, next))) &&
+            started.call.name !== 'write_document'
+              ? nextRoundVersion(previous, next)
+              : undefined
+        }
         const changed = observed && observedEffect(started.values, after)
         const complete =
           observed && after.length > 0 && after.every((item) => item.version.complete)
         const effect =
+          result.effect ??
           result.externalEffect ??
           (started.recovery === 'repeat_read' || result.denied
             ? 'not_applied'
@@ -533,7 +628,10 @@ export class AssistantTaskService {
                     ? 'applied'
                     : 'not_applied'
                   : 'unknown')
-        const changes = changed ? await taskFileChanges(started.values, after).catch(() => []) : []
+        const changes =
+          changed && effect === 'applied'
+            ? await taskFileChanges(started.values, after).catch(() => [])
+            : []
         for (const change of changes) {
           change.tools = [started.call.name]
           mergeTaskFileChange(fileChanges, change)
@@ -545,6 +643,23 @@ export class AssistantTaskService {
             result,
             effect,
             targets: targets(after),
+            ...(after.some((item) => item.version.type === 'docx')
+              ? {
+                  wordSaveVerified: after.every(
+                    (item) =>
+                      item.version.type !== 'docx' ||
+                      verifiedWordSave(
+                        started.values.find(
+                          (previous) =>
+                            previous.version.path === item.version.path ||
+                            (!!previous.version.editorIdentity &&
+                              previous.version.editorIdentity === item.version.editorIdentity),
+                        ),
+                        item,
+                      ),
+                  ),
+                }
+              : {}),
             evidence: changes.flatMap((change) =>
               change.evidence ? [{ id: change.evidence.id, change }] : [],
             ),
@@ -585,12 +700,9 @@ export class AssistantTaskService {
             }
             const changes = review?.changes ?? [...fileChanges.values()]
             const saved =
-              changes.length > 0 &&
-              changes.every(
-                (change) =>
-                  change.evidence?.saveState === 'saved' &&
-                  change.evidence.verification === 'passed',
-              )
+              result.state === 'completed' && request.requiredResult === 'saved_artifact'
+                ? await checkSaved()
+                : undefined
             const edited = changes.some(
               (change) =>
                 change.evidence?.effect === 'changed' && change.evidence.verification === 'passed',
@@ -600,6 +712,7 @@ export class AssistantTaskService {
             const resultMissing =
               result.state === 'completed' &&
               (!!unfulfilled ||
+                Object.keys(this.store.plan(id).pendingWordParts ?? {}).length > 0 ||
                 (request.requiredResult === 'saved_artifact' && !saved) ||
                 (request.requiredResult === 'editor_change' && !edited))
             if (review) {

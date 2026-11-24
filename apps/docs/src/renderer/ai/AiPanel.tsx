@@ -17,7 +17,7 @@ import {
   type AiTokenUsageView,
   useChatRunQueue,
 } from '@genoffice/ui'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { aiRevisionAuthor } from './revision-author'
 import type { Editor } from '@tiptap/core'
 import type { Block } from '@genoffice/docx-engine'
@@ -58,6 +58,7 @@ import {
 } from './tools'
 import type { AiPageSetupAccess } from './page-setup'
 import type { AiNotesAccess } from './note-ops'
+import { registerWorkspaceDocs } from './workspace-docs'
 import { createDocsSkill } from './docs-skill'
 import { MindMapCard } from './MindMapCard'
 import { insertPictureAtSelection } from '../editor/insert-picture'
@@ -724,7 +725,7 @@ export function AiPanel({
     signal?: AbortSignal,
   ): Promise<DocWriteResult> => {
     const { system, user } = buildDocWriterRequest(
-      { ...spec, instruction: lastInstructionRef.current },
+      { ...spec, instruction: spec.instruction || lastInstructionRef.current },
       aiLangDirective(),
     )
     const epoch = writerEpochRef.current
@@ -764,6 +765,11 @@ export function AiPanel({
     if (outcome.status === 'empty') return { ok: false, error: outcome.error }
     if (epoch !== writerEpochRef.current) return { ok: false, error: 'the chat was reset' }
     // the draft stays in the document while the user decides
+    if (spec.instruction)
+      return {
+        ok: false,
+        error: 'The workspace draft stopped before completion. Retry with a shorter section.',
+      }
     const keep = await new Promise<boolean>((resolve) => {
       partialResolverRef.current = resolve
       setActivePartial({ blocks: countFragmentBlocks(outcome.text) })
@@ -793,11 +799,50 @@ export function AiPanel({
   const mountedRef = useRef(true)
   const runGenerationRef = useRef(0)
   const runStartingRef = useRef(false)
-  if (!loopRef.current) {
-    const numIds = (): NumIds => ({
-      bullet: findNumId(blocksRef.current, 'bullet') ?? numIdFallbackRef.current?.bullet ?? null,
-      ordered: findNumId(blocksRef.current, 'ordered') ?? numIdFallbackRef.current?.ordered ?? null,
+  const createWordSkill = useCallback(
+    (instruction = '') =>
+      createDocsSkill(
+        () => editorRef.current,
+        (): NumIds => ({
+          bullet:
+            findNumId(blocksRef.current, 'bullet') ?? numIdFallbackRef.current?.bullet ?? null,
+          ordered:
+            findNumId(blocksRef.current, 'ordered') ?? numIdFallbackRef.current?.ordered ?? null,
+        }),
+        () => (trackChangesRef.current ? { author: aiRevisionAuthor() } : undefined),
+        () => commentsAccessRef.current,
+        () => hfAccessRef.current,
+        () => imageGenerationAvailable(settingsRef.current, false),
+        () => ({
+          write: (spec, onProgress, signal) =>
+            runDocWriterRef.current({ ...spec, instruction }, onProgress, signal),
+        }),
+        () => pageSetupAccessRef.current,
+        () => docExtrasRef.current,
+        () => notesAccessRef.current,
+        () => mediaAnalysisAvailable(settingsRef.current, false),
+      ),
+    [],
+  )
+  useEffect(() => {
+    if (!editor) return
+    return registerWorkspaceDocs(editor, {
+      create: createWordSkill,
+      busy: () => !!loopRef.current?.busy,
+      parts: () => ({
+        headerFooter: hfAccessRef.current?.read(),
+        styles: docExtrasRef.current?.styles?.list(),
+        comments: commentsAccessRef.current?.list(),
+        sections: pageSetupAccessRef.current
+          ?.list()
+          .map(({ firstBlock: _first, lastBlock: _last, ...section }) => section),
+        footnotes: notesAccessRef.current?.list('footnote'),
+        endnotes: notesAccessRef.current?.list('endnote'),
+        watermark: docExtrasRef.current?.watermark?.current(),
+      }),
     })
+  }, [editor, createWordSkill])
+  if (!loopRef.current) {
     loopRef.current = new AgentLoop<PmNode>({
       persistence: createChatPersistence(() => window.projectApi, chatRefIds),
       transport: transportRef.current,
@@ -819,21 +864,7 @@ export function AiPanel({
               }),
             ]
           : []),
-        createDocsSkill(
-          () => editorRef.current,
-          numIds,
-          () => (trackChangesRef.current ? { author: aiRevisionAuthor() } : undefined),
-          () => commentsAccessRef.current,
-          () => hfAccessRef.current,
-          () => imageGenerationAvailable(settingsRef.current, false),
-          () => ({
-            write: (spec, onProgress, signal) => runDocWriterRef.current(spec, onProgress, signal),
-          }),
-          () => pageSetupAccessRef.current,
-          () => docExtrasRef.current,
-          () => notesAccessRef.current,
-          () => mediaAnalysisAvailable(settingsRef.current, false),
-        ),
+        createWordSkill(),
         createFilesSkill(availableAttachments),
         createSkillsSkill(),
       ]),
@@ -1506,13 +1537,6 @@ export function AiPanel({
       </div>
 
       <div ref={logRef} className="ai-chat" onScroll={onLogScroll}>
-        <FileTaskPanel
-          api={window.projectApi}
-          ids={chatRefIds}
-          lang={lang}
-          busy={busy}
-          resume={(instruction) => runWith(instruction, instruction, [], null)}
-        />
         {/* past conversation (read-only transcript, not fed to the model), shown continuously with the current turn */}
         {historicChat.length > 0 && (
           <>
@@ -1720,6 +1744,13 @@ export function AiPanel({
             </div>
           )
         })}
+        <FileTaskPanel
+          api={window.projectApi}
+          ids={chatRefIds}
+          lang={lang}
+          busy={busy}
+          resume={(instruction) => runWith(instruction, instruction, [], null)}
+        />
       </div>
 
       <div className="ai-composer">

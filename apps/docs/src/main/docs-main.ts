@@ -142,6 +142,7 @@ import {
   findOpenableDocPath,
   isOpenableDocPath,
 } from '../shared/open-file'
+import { publishSaveWitness, witnessBytes } from '@genoffice/electron-utils/save-witness'
 import { atomicWriteFile } from './atomic-write'
 import { bareFileName } from './file-name'
 import {
@@ -3587,10 +3588,30 @@ export function markDocsNewBlank(wcId: number): void {
 
 /** AI-authored content waiting for its create_document tab, keyed by webContents id */
 const pendingAiDocContents = new Map<number, AiDocContent>()
+const generatedWordSaves = new Map<
+  string,
+  {
+    owner?: number
+    title: string
+    written?: CreateDocumentResult
+    finish(result: CreateDocumentResult): void
+  }
+>()
+
+function finishGeneratedSave(owner: number, result: CreateDocumentResult, name?: string): void {
+  for (const writer of generatedWordSaves.values()) {
+    if (writer.owner === owner && (!name || name === writer.title + '.docx')) {
+      if (result.ok) writer.written = result
+      else writer.finish(result)
+    }
+  }
+}
 
 /** queue AI content for a fresh blank docs tab (called by the shell right after creating the view) */
 export function queueDocsAiContent(wcId: number, content: AiDocContent): void {
   pendingAiDocContents.set(wcId, content)
+  const writer = content.creationId && generatedWordSaves.get(content.creationId)
+  if (writer) writer.owner = wcId
 }
 
 /** the single real BrowserWindow hosting the tab strip, used as dialog parent in tab mode */
@@ -3983,6 +4004,10 @@ function dropDocWriter(wcId: number): void {
   // destruction must still fail its re-check (wcIds are never reused, so the
   // set only accumulates a few integers per session).
   tornDownWcIds.add(wcId)
+  finishGeneratedSave(wcId, {
+    ok: false,
+    error: 'The generated Word tab closed before its first save was confirmed.',
+  })
 }
 
 // ── External-modification detection: remember the disk state at every read/write
@@ -5537,6 +5562,11 @@ export function registerDocsIpc(): void {
       const passwordIntentPending = commitDocPasswordSave(event.sender.id, passwordState, filePath)
       pushRecent(filePath)
       const savedPath = notifyFileSaved(event.sender, filePath)
+      finishGeneratedSave(
+        event.sender.id,
+        { ok: true, path: filePath, sha256: sha256Hex(bytes) },
+        defaultName,
+      )
       return {
         ok: true,
         path: savedPath,
@@ -5544,8 +5574,20 @@ export function registerDocsIpc(): void {
         ...reissuedDoc(!!passwordState.password, hashes, plain),
       }
     } catch (err) {
+      finishGeneratedSave(event.sender.id, { ok: false, error: String(err) }, defaultName)
       return { ok: false, error: String(err) }
     }
+  })
+
+  ipcMain.handle('docs:finish-generated-save', (event, id: unknown, saved: unknown) => {
+    if (typeof id !== 'string') return
+    const writer = generatedWordSaves.get(id)
+    if (writer?.owner !== event.sender.id) return
+    writer.finish(
+      saved === true && writer.written
+        ? writer.written
+        : { ok: false, error: 'The generated Word document did not confirm saving its content.' },
+    )
   })
 
   ipcMain.handle(
@@ -6266,14 +6308,31 @@ export async function createAiDocument(
   if (!content.trim()) return { ok: false, error: 'content must not be empty' }
   try {
     if (type === 'docx') {
-      const payload: AiDocContent = { title, html: content }
-      if (shellHooks?.openAiDocTab) shellHooks.openAiDocTab(payload)
-      else {
-        const win = createDocsWindow(undefined)
-        markDocsNewBlank(win.webContents.id)
-        queueDocsAiContent(win.webContents.id, payload)
-      }
-      return { ok: true }
+      const creationId = randomUUID()
+      return await new Promise<CreateDocumentResult>((resolve) => {
+        const finish = (result: CreateDocumentResult) => {
+          clearTimeout(timer)
+          generatedWordSaves.delete(creationId)
+          resolve(result)
+        }
+        const timer = setTimeout(
+          () =>
+            finish({ ok: false, error: 'The new Word file has no confirmed first-save receipt.' }),
+          120_000,
+        )
+        generatedWordSaves.set(creationId, { title, finish })
+        try {
+          const payload: AiDocContent = { title, html: content, creationId }
+          if (shellHooks?.openAiDocTab) shellHooks.openAiDocTab(payload)
+          else {
+            const win = createDocsWindow(undefined)
+            markDocsNewBlank(win.webContents.id)
+            queueDocsAiContent(win.webContents.id, payload)
+          }
+        } catch (error) {
+          finish({ ok: false, error: String(error) })
+        }
+      })
     }
     if (type === 'pdf') {
       const bytes = await printHtmlToPdf(
@@ -6283,14 +6342,18 @@ export async function createAiDocument(
       )
       const filePath = uniquePathIn(defaultSaveDir(), `${title}.pdf`)
       await writeFile(filePath, bytes)
+      const witness = witnessBytes(bytes)
+      publishSaveWitness(filePath, witness)
       openGeneratedFile(filePath)
-      return { ok: true, path: filePath }
+      return { ok: true, path: filePath, sha256: witness?.sha256 }
     }
     if (type === 'md' || type === 'html') {
       const filePath = uniquePathIn(defaultSaveDir(), `${title}.${type}`)
       await writeFile(filePath, content, 'utf8')
+      const witness = witnessBytes(Buffer.from(content))
+      publishSaveWitness(filePath, witness)
       openGeneratedFile(filePath)
-      return { ok: true, path: filePath }
+      return { ok: true, path: filePath, sha256: witness?.sha256 }
     }
     return { ok: false, error: `unsupported document type: ${String(type)}` }
   } catch (err) {

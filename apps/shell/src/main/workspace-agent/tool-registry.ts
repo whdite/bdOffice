@@ -14,7 +14,7 @@ import { validateToolInput } from '../../shared/tool-input-schema'
 export { validateToolInput } from '../../shared/tool-input-schema'
 
 function errorExecution(name: string, message: string): ToolExecution {
-  return { output: message, summary: name, isError: true }
+  return { output: message, summary: name, isError: true, effect: 'not_applied' }
 }
 
 function assertNotCancelled(context: HarnessToolContext): void {
@@ -121,6 +121,7 @@ export class HarnessToolRegistry {
   async execute(call: AgentToolCall, context: HarnessToolContext = {}): Promise<ToolExecution> {
     let normalized = call
     let execution: ToolExecution
+    let dispatched = false
     try {
       assertNotCancelled(context)
       for (const hook of this.preHooks) {
@@ -153,19 +154,22 @@ export class HarnessToolRegistry {
               break
             }
           }
-          execution =
-            denied === false
-              ? errorExecution(normalized.name, `Tool execution was denied: ${normalized.name}`)
-              : typeof denied === 'string'
-                ? errorExecution(normalized.name, denied)
-                : await registration.execute(normalized, context)
+          if (denied === false || typeof denied === 'string') {
+            execution = errorExecution(
+              normalized.name,
+              denied || `Tool execution was denied: ${normalized.name}`,
+            )
+          } else {
+            dispatched = true
+            execution = await registration.execute(normalized, context)
+          }
         }
       }
     } catch (error) {
-      execution = errorExecution(
-        normalized.name,
-        error instanceof Error ? error.message : String(error),
-      )
+      execution = {
+        ...errorExecution(normalized.name, error instanceof Error ? error.message : String(error)),
+        effect: dispatched ? 'unknown' : 'not_applied',
+      }
     }
 
     // Post hooks are deliberately best-effort but always receive a terminal

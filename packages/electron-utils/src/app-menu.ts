@@ -691,7 +691,7 @@ export function aboutMenuItem(labels: AppMenuLabels): MenuItemConstructorOptions
         type: 'info',
         title: '大狗Office',
         message: '大狗Office',
-        detail: `${labels.version} ${version}\nBased on BigDogOffice. Thanks to the upstream contributors.`,
+        detail: `${labels.version} ${version}`,
         buttons: ['OK', labels.copy, ...(canCheck ? [labels.checkUpdates] : [])],
         defaultId: 0,
         cancelId: 0,

@@ -106,14 +106,21 @@ export function createChatPersistence(
         },
         usage: (modelCallId, usage) => call('usage', { ...args(), modelCallId, usage }),
         beforeApproval: (proposal) => call('beforeApproval', { ...args(), call: proposal }),
-        afterApproval: (proposal, allowed) =>
-          call('afterApproval', { ...args(), call: proposal, allowed }),
+        afterApproval: (proposal, allowed, round) =>
+          call('afterApproval', {
+            ...args(),
+            call: proposal,
+            allowed,
+            ...(round ? { round: true } : {}),
+          }),
         prepareTool: (proposal, signal) => {
           signal.throwIfAborted()
           return call('prepareTool', { ...args(), call: proposal })
         },
         finishTool: (permit, result, checkpoint) =>
           call('finishTool', { ...args(), permit, result, checkpoint }),
+        pendingWordParts: () => call('pendingWordParts', args()),
+        checkSaved: () => call('checkSaved', args()),
         finish: (result, checkpoint) => call('finish', { ...args(), result, checkpoint }),
       }
     },

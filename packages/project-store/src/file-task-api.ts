@@ -18,6 +18,7 @@ export interface FileTaskItem {
   revision: number
   reason?: string
   pendingControl?: 'pause' | 'cancel'
+  reviewTargets?: string[]
   attempts: number
   resumeRequested: boolean
   confirmation?: { id: string; kind: string; text: string } | undefined
@@ -36,6 +37,7 @@ export interface FileTaskRequests {
     expectedRevision: number
     action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reconcile'
     reviewed?: boolean
+    continueAfterReview?: boolean
   }
   answer: ResolveChatResult & {
     taskId: string
@@ -54,13 +56,15 @@ export interface FileTaskRequests {
   reserveModel: RunBound & { checkpoint: AgentSessionSnapshot }
   usage: RunBound & { modelCallId: string; usage: AgentTokenUsage }
   beforeApproval: RunBound & { call: AgentToolCall }
-  afterApproval: RunBound & { call: AgentToolCall; allowed: boolean }
+  afterApproval: RunBound & { call: AgentToolCall; allowed: boolean; round?: boolean }
   prepareTool: RunBound & { call: AgentToolCall }
   finishTool: RunBound & {
     permit: TaskToolPermit
     result: ToolExecution
     checkpoint: AgentSessionSnapshot
   }
+  pendingWordParts: RunBound
+  checkSaved: RunBound
   finish: RunBound & { result: TaskExecutionEnd; checkpoint: AgentSessionSnapshot }
 }
 type RunBound = ResolveChatResult & { writerId: string; token: string }
@@ -80,10 +84,12 @@ export interface FileTaskReplies {
   abortBegin: void
   reserveModel: string
   usage: void
-  beforeApproval: void
+  beforeApproval: void | import('@genoffice/agent-core').TaskApprovalScope
   afterApproval: void
   prepareTool: TaskToolPermit
   finishTool: void
+  pendingWordParts: string[]
+  checkSaved: boolean | undefined
   finish: void
 }
 export type FileTaskCall = <K extends keyof FileTaskRequests>(

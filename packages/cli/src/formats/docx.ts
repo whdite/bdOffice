@@ -1,3 +1,7 @@
+import {
+  observedStyleProperties,
+  patchProperties,
+} from '../../../../apps/docs/src/renderer/ai/style-ops'
 import { clipText } from '../preview'
 import type { Editor } from '@tiptap/core'
 import JSZip from 'jszip'
@@ -231,6 +235,31 @@ export async function openDocument(bytes: Uint8Array): Promise<OpenDocument> {
     ordered: mods.protocol.findNumId(parsed.blocks, 'ordered') ?? BLANK_ORDERED_NUM_ID,
   }
   return { parsed, editor, numIds, mods, side: sideStateOf(parsed) }
+}
+
+/** The worker edits a disposable model. The caller publishes bytes only after a successful result. */
+export async function runWordOperation(
+  doc: OpenDocument,
+  name: string,
+  input: Record<string, unknown>,
+) {
+  const { createDocsSkill } = await import('../../../../apps/docs/src/renderer/ai/docs-skill')
+  const { executeWordOperation } = await import('@genoffice/agent-core')
+  const skill = createDocsSkill(
+    () => doc.editor,
+    () => doc.numIds,
+    undefined,
+    () => commentsAccess(doc),
+    () => headerFooterAccess(doc),
+    () => false,
+    undefined,
+    () => pageSetupAccess(doc),
+    () => docExtras(doc),
+    () => notesAccess(doc),
+    () => false,
+  )
+  skill.buildContext?.()
+  return executeWordOperation(skill, { id: 'workspace-word', name, input }, false)
 }
 
 export async function blankDocument(): Promise<OpenDocument> {
@@ -1591,6 +1620,7 @@ function docExtras(doc: OpenDocument): DocExtras {
 }
 
 export interface StyleSummary {
+  properties?: Record<string, unknown>
   styleId: string
   name: string
   type: 'paragraph' | 'character' | 'table'
@@ -1625,6 +1655,7 @@ export function listStyles(doc: OpenDocument): StyleSummary[] {
     if (s.headingLevel && /^Heading[1-9]$/.test(s.styleId))
       inUse += headings.get(s.headingLevel) ?? 0
     out.set(s.styleId, {
+      properties: observedStyleProperties(s),
       styleId: s.styleId,
       name: s.name,
       type: s.type,
@@ -1643,6 +1674,7 @@ export function listStyles(doc: OpenDocument): StyleSummary[] {
       parsed,
     )
     out.set(up.styleId, {
+      properties: { ...cur?.properties, ...patchProperties(up) },
       styleId: up.styleId,
       name: up.name ?? cur?.name ?? up.styleId,
       type: cur?.type ?? up.type ?? 'paragraph',

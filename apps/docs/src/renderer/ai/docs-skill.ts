@@ -3,7 +3,7 @@ import { assertNoDocumentDraft } from './draft-state'
 import { placeholderInstruction } from './redact'
 import { redactLabelsOf } from './redact-view'
 import type { Editor } from '@tiptap/core'
-import type { AgentSkill } from '@genoffice/agent-core'
+import { wordToolReceipt, type AgentSkill } from '@genoffice/agent-core'
 import {
   AGENT_SYSTEM_PROMPT,
   buildDocContext,
@@ -99,20 +99,23 @@ export function createDocsSkill(
         getPageSetup?.()?.list(),
       )
     },
-    executeTool: (call, signal) =>
-      executeTool(
-        getEditor(),
-        call,
-        getNumIds(),
-        getTrack?.(),
-        signal,
-        frozen,
-        getComments?.(),
-        getHf?.(),
-        getWriter?.(),
-        getPageSetup?.(),
-        getExtras?.(),
-        getNotes?.(),
+    executeTool: async (call, signal) =>
+      wordToolReceipt(
+        await executeTool(
+          getEditor(),
+          call,
+          getNumIds(),
+          getTrack?.(),
+          signal,
+          frozen,
+          getComments?.(),
+          getHf?.(),
+          getWriter?.(),
+          getPageSetup?.(),
+          getExtras?.(),
+          getNotes?.(),
+        ),
+        call.name,
       ),
   }
 }

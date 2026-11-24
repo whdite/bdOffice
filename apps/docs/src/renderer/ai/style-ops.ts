@@ -12,6 +12,7 @@ export interface AiStyleInfo {
   type: 'paragraph' | 'character' | 'table'
   basedOn?: string
   headingLevel?: number
+  properties?: Record<string, unknown>
   /** defined or changed in this session, not saved yet */
   pending?: boolean
 }
@@ -142,8 +143,8 @@ export const DEFINE_STYLE_TOOL: AgentToolDef = {
 export const LIST_STYLES_TOOL: AgentToolDef = {
   name: 'list_styles',
   description:
-    'List the styles defined in the document (id, name, type, parent, heading level) for define_style / applyStyle.',
-  inputSchema: { type: 'object', properties: {}, required: [] },
+    'List defined styles; supply styleId to inspect one definition and its formatting after define_style.',
+  inputSchema: { type: 'object', properties: { styleId: { type: 'string' } }, required: [] },
 }
 
 const HEX = /^#?([0-9a-f]{6})$/i
@@ -321,6 +322,35 @@ export function styleIds(styles: AiStyleInfo[], type?: AiStyleInfo['type']): str
   return ids.length > 40
     ? `${ids.slice(0, 40).join(', ')}, ... (${ids.length} total)`
     : ids.join(', ')
+}
+
+export function stylePartValues(
+  id: string,
+  properties: Record<string, unknown>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(properties)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [`style.${id}.${key}`, JSON.stringify(value)]),
+  )
+}
+export function patchProperties(up: StyleUpsert): Record<string, unknown> {
+  const { rPr, pPr, ...metadata } = up
+  return { ...metadata, ...rPr, ...pPr }
+}
+export function observedStyleProperties(
+  s: import('@genoffice/docx-engine').StyleInfo,
+): Record<string, unknown> {
+  return {
+    ...s.display,
+    styleId: s.styleId,
+    name: s.name,
+    type: s.type,
+    basedOn: s.basedOn ?? null,
+    quickFormat: s.qFormat ?? false,
+    outlineLevel: s.headingLevel,
+    firstLineTwips: s.display?.indentFirstLineTwips,
+  }
 }
 
 export function describeStyles(styles: AiStyleInfo[]): string {

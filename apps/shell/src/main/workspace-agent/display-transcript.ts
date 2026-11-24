@@ -41,8 +41,8 @@ export function displayTranscript(
   return state
 }
 export function applyDisplayEvent(state: DisplayTranscript, event: WorkspaceAgentEvent): void {
-  if (event.type === 'assistant.message' && event.text) {
-    if (event.role === 'user') {
+  if (event.type === 'assistant.message' && (event.text || event.replaceText)) {
+    if (event.role === 'user' && event.text) {
       state.messages.push({
         seq: (state.messages.at(-1)?.seq ?? -1) + 1,
         ts: event.timestamp,
@@ -53,8 +53,11 @@ export function applyDisplayEvent(state: DisplayTranscript, event: WorkspaceAgen
     } else {
       const active =
         state.active === undefined ? undefined : state.messages.find((m) => m.seq === state.active)
-      if (active) active.text = (active.text + event.text).slice(0, 100000)
-      else {
+      if (active && event.replaceText && !event.text) {
+        state.messages = state.messages.filter(message => message !== active)
+        state.active = undefined
+      } else if (active) active.text = (event.replaceText ? event.text ?? '' : active.text + event.text).slice(0, 100000)
+      else if (event.text) {
         const seq = (state.messages.at(-1)?.seq ?? -1) + 1
         state.messages.push({
           seq,

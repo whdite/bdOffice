@@ -16,6 +16,8 @@ export type AssistantTaskState =
   | 'failed'
   | 'cancelled'
 export interface TaskTargetVersion {
+  /** A separate file attested by the app writer during this task. */
+  generatedFile?: boolean
   path: string
   type?: WorkspaceFileType
   exists: boolean
@@ -59,6 +61,7 @@ export interface AssistantTaskView {
   createdAt: number
   updatedAt: number
   budget: AssistantTaskBudget
+  reviewTargets?: string[]
   steps: Array<{ id: string; label: string; state: string; effect: string }>
   confirmation?: {
     id: string
@@ -75,6 +78,7 @@ export interface AssistantTaskControl {
   action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reconcile'
   /** An explicit decision after reviewing uncertain effects. No old grant is restored. */
   reviewed?: boolean
+  continueAfterReview?: boolean
 }
 export interface AssistantTaskAnswer {
   taskId: string

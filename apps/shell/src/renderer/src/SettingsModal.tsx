@@ -38,6 +38,7 @@ import { EnvironmentPanel } from './settings/EnvironmentPanel'
 import { RemotePanel } from './settings/RemotePanel'
 import { environmentCopy } from '../../shared/environment-copy'
 import type { BigDogReleaseStatus } from '../../shared/bigdog-release'
+import type { UpdateChannel } from '../../shared/update-api'
 import appIcon from './assets/app-icon.svg'
 import { IntegrationsPane, skillUpdateDue } from './IntegrationsPane'
 import { FoundSkills } from './FoundSkills'
@@ -1078,7 +1079,7 @@ export function SettingsModal({
   const [analyticsSaving, setAnalyticsSaving] = useState(false)
   const [autoSaveOn, setAutoSaveOn] = useState(false)
   const [aiPrefs, setAiPrefs] = useState<AiPanelPrefs>(DEFAULT_AI_PANEL_PREFS)
-  const [channel, setChannel] = useState<'stable' | 'beta'>('stable')
+  const [channel, setChannel] = useState<UpdateChannel>('stable')
   const [appVersion, setAppVersion] = useState('')
   const brand = bigDogCopy(lang)
   const [releaseStatus, setReleaseStatus] = useState<BigDogReleaseStatus | null>(null)
@@ -1127,6 +1128,28 @@ export function SettingsModal({
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
+
+  const releaseRequest = useRef(false)
+  const checkRelease = async (next?: UpdateChannel) => {
+    if (releaseRequest.current) return
+    releaseRequest.current = true
+    setReleaseBusy(true)
+    setReleaseError('')
+    setReleaseStatus(null)
+    try {
+      if (next) {
+        await window.aiOffice.setUpdateChannel(next)
+        if (mounted.current) setChannel(next)
+      }
+      const status = await window.aiOffice.checkBigDogRelease()
+      if (mounted.current) setReleaseStatus(status)
+    } catch {
+      if (mounted.current) setReleaseStatus({ phase: 'error' })
+    } finally {
+      releaseRequest.current = false
+      if (mounted.current) setReleaseBusy(false)
+    }
+  }
 
   const generalAction = async (action: () => Promise<void | false>) => {
     const version = ++generalRevision.current
@@ -1416,7 +1439,7 @@ export function SettingsModal({
                   label={brand.website}
                   value={<BigDogWebsiteLink className="set-about-website" showAddress />}
                 />
-                <p className="set-about-copy">{brand.attribution}</p>
+                <p className="set-about-copy">{brand.productDescription}</p>
                 <p className="set-field-desc">{brand.licenses}</p>
                 <div className="set-field">
                   <div className="set-field-text">
@@ -1431,17 +1454,7 @@ export function SettingsModal({
                       label: t(opt.labelKey),
                     }))}
                     disabled={releaseBusy}
-                    onPick={(v) => {
-                      const next = v === 'beta' ? 'beta' : 'stable'
-                      setReleaseBusy(true)
-                      setReleaseError('')
-                      setReleaseStatus(null)
-                      void window.aiOffice
-                        .setUpdateChannel(next)
-                        .then(() => setChannel(next))
-                        .catch(() => setReleaseError(brand.checkFailed))
-                        .finally(() => setReleaseBusy(false))
-                    }}
+                    onPick={(v) => void checkRelease(v === 'beta' ? 'beta' : 'stable')}
                   />
                 </div>
                 <div className="set-about-releases">
@@ -1452,16 +1465,7 @@ export function SettingsModal({
                       className="set-btn"
                       disabled={releaseBusy}
                       aria-busy={releaseBusy}
-                      onClick={() => {
-                        setReleaseBusy(true)
-                        setReleaseError('')
-                        setReleaseStatus(null)
-                        void window.aiOffice
-                          .checkBigDogRelease()
-                          .then(setReleaseStatus)
-                          .catch(() => setReleaseStatus({ phase: 'error' }))
-                          .finally(() => setReleaseBusy(false))
-                      }}
+                      onClick={() => void checkRelease()}
                     >
                       {releaseBusy ? brand.checking : brand.checkUpdates}
                     </button>

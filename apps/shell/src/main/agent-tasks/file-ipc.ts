@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron'
 import {
-  EDITOR_ROUTES,
+  editorToolCapability,
+  recoveryForCapability,
+  explicitlyRequestsSave,
   type AgentSessionSnapshot,
   type AgentTaskExecution,
   type AgentToolCall,
@@ -47,6 +49,9 @@ export function parseAssistantTaskControl(value: unknown): AssistantTaskControl 
     expectedRevision: row.expectedRevision,
     action: row.action as AssistantTaskControl['action'],
     ...(row.reviewed === true ? { reviewed: true } : {}),
+    ...(row.action === 'reconcile' && row.continueAfterReview === true
+      ? { continueAfterReview: true }
+      : {}),
   }
 }
 export function parseAssistantTaskAnswer(value: unknown): AssistantTaskAnswer {
@@ -82,37 +87,22 @@ function proposal(value: unknown): AgentToolCall {
     throw new Error('task_payload_too_large')
   return { id: row.id, name: row.name, input }
 }
-const readTools = new Set([
-  'web_search',
-  'search_files',
-  'read_attachment',
-  'list_attachments',
-  'read_file',
-  'search_document',
-  'get_selection',
-  'read_context',
-  'list_tools',
-])
-function recovery(
-  kind: EditorHarnessKind,
-  call: AgentToolCall,
-): ReturnType<TaskExecutorBinding['classify']> {
-  const route = EDITOR_ROUTES[kind]
-  if (
-    route.read.includes(call.name) ||
-    route.verify.includes(call.name) ||
-    readTools.has(call.name)
-  )
-    return 'repeat_read'
-  if (
-    route.write.includes(call.name) ||
-    /^(?:save_document|save_workbook|save|set_form_field|replace_page_image|edit_annotation|remove_annotation)$/.test(
-      call.name,
+function fileWordEvidence(value: unknown): NonNullable<ToolExecution['wordPart']> {
+  const data = object(value),
+    result: NonNullable<ToolExecution['wordPart']> = {}
+  for (const field of ['expected', 'observed'] as const) {
+    if (!data[field]) continue
+    const values = object(data[field])
+    if (
+      Object.values(values).some((v) => typeof v !== 'string') ||
+      Buffer.byteLength(JSON.stringify(values)) > 2 * 1024 * 1024
     )
-  )
-    return 'verify_effect'
-  return 'user_reconcile'
+      throw new Error('invalid_word_observation')
+    result[field] = values as Record<string, string>
+  }
+  return result
 }
+
 interface Run {
   token: string
   taskId: string
@@ -176,6 +166,7 @@ export function registerFileTaskIpc(options: {
       reason: task.reason,
       pendingControl: task.pendingControl,
       confirmation: task.confirmation,
+      ...(task.reviewTargets ? { reviewTargets: task.reviewTargets } : {}),
       attempts: task.budget.usedAttempts,
       resumeRequested: !!service.store.plan(id).resumeRequested,
     }
@@ -258,7 +249,7 @@ export function registerFileTaskIpc(options: {
           if (!sender.isDestroyed())
             sender.send('project:cancel-chat', options.chats.current(sender.id)?.ids ?? bound.ids)
         },
-        classify: (call) => recovery(editor.kind, call),
+        classify: (call) => recoveryForCapability(editorToolCapability(call, editor.kind)),
         approveEach: options.approveEach,
         observe: async () => [await options.observe(sender, sessionId)],
         inspectTarget: (expected) => options.inspect(sender, sessionId, expected),
@@ -276,7 +267,7 @@ export function registerFileTaskIpc(options: {
           entry: 'file',
           input: { text: goal },
           document: observation.version,
-          requiredResult: 'answer',
+          requiredResult: explicitlyRequestsSave(goal) ? 'saved_artifact' : 'answer',
         }
         let resumeId = row.resumeId === undefined ? undefined : taskId(row.resumeId)
         const question =
@@ -346,7 +337,11 @@ export function registerFileTaskIpc(options: {
       case 'beforeApproval':
         return execution.beforeApproval?.(proposal(row.call))
       case 'afterApproval':
-        return execution.afterApproval?.(proposal(row.call), row.allowed === true)
+        return execution.afterApproval?.(
+          proposal(row.call),
+          row.allowed === true,
+          row.round === true,
+        )
       case 'prepareTool':
         return execution.prepareTool(proposal(row.call), signal)
       case 'finishTool': {
@@ -358,6 +353,23 @@ export function registerFileTaskIpc(options: {
           isError: value.isError === true,
           mutated: value.mutated === true,
           denied: value.denied === true,
+          ...(value.externalEffect === 'applied' ||
+          value.externalEffect === 'not_applied' ||
+          value.externalEffect === 'unknown'
+            ? { externalEffect: value.externalEffect }
+            : {}),
+          ...(value.savedFile &&
+          typeof value.savedFile === 'object' &&
+          typeof object(value.savedFile).path === 'string' &&
+          /^[a-f0-9]{64}$/.test(String(object(value.savedFile).sha256))
+            ? { savedFile: value.savedFile as ToolExecution['savedFile'] }
+            : {}),
+          ...(value.wordPart ? { wordPart: fileWordEvidence(value.wordPart) } : {}),
+          ...(value.effect === 'not_applied' ||
+          value.effect === 'applied' ||
+          value.effect === 'unknown'
+            ? { effect: value.effect }
+            : {}),
         }
         return execution.finishTool(
           { stepId: taskId(permit.stepId), ...(permit.reused ? { reused: result } : {}) },
@@ -365,6 +377,10 @@ export function registerFileTaskIpc(options: {
           checkpoint(),
         )
       }
+      case 'pendingWordParts':
+        return execution.pendingWordParts?.() ?? []
+      case 'checkSaved':
+        return execution.checkSaved?.()
       case 'finish': {
         const result = object(row.result)
         if (

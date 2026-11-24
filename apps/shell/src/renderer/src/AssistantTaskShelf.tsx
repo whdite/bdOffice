@@ -28,8 +28,12 @@ export function AssistantTaskShelf({
   visible = true,
   onActivityChange,
   onNavigate,
+  sessionId,
+  onOpenFile,
 }: {
   lang: string
+  sessionId?: string
+  onOpenFile?(path: string): void
   embedded?: boolean
   visible?: boolean
   onActivityChange?(activity: TaskActivity): void
@@ -39,11 +43,10 @@ export function AssistantTaskShelf({
     copy = officeTaskCopy(lang)
   const [open, setOpen] = useState(false),
     [feed, setFeed] = useState<AssistantTaskFeed>({ tasks: [], notices: [], throughCursor: 0 })
-  const expanded = embedded ? visible : open
+  const expanded = !!sessionId || (embedded ? visible : open)
   const [loaded, setLoaded] = useState(false),
     [feedError, setFeedError] = useState(false)
   const [working, setWorking] = useState(''),
-    [reviewed, setReviewed] = useState(''),
     [error, setError] = useState('')
   const [results, setResults] = useState<{
     taskId: string
@@ -57,7 +60,7 @@ export function AssistantTaskShelf({
       if (pending || document.visibilityState === 'hidden') return
       pending = true
       try {
-        const value = await api.feed()
+        const value = await api.feed(sessionId)
         if (alive) {
           setFeed(value)
           setLoaded(true)
@@ -75,7 +78,7 @@ export function AssistantTaskShelf({
       alive = false
       clearInterval(timer)
     }
-  }, [api, expanded])
+  }, [api, expanded, sessionId])
   const needsAttention = (task: AssistantTaskView) =>
     task.state === 'waiting_user' ||
     task.state === 'interrupted' ||
@@ -109,13 +112,13 @@ export function AssistantTaskShelf({
         requestId: crypto.randomUUID(),
         expectedRevision: task.revision,
         action,
-        reviewed: action === 'reconcile' && reviewed === task.id,
+        reviewed: action === 'reconcile',
+        ...(action === 'reconcile' ? { continueAfterReview: true } : {}),
       })
       setFeed((current) => ({
         ...current,
         tasks: current.tasks.map((value) => (value.id === result.id ? result : value)),
       }))
-      setReviewed('')
     } catch (error) {
       setError(
         copy.reason(error instanceof Error ? error.message.split(/[: ]/).at(-1) : undefined) ??
@@ -126,6 +129,76 @@ export function AssistantTaskShelf({
     }
   }
   if (!api) return embedded && visible ? <p role="alert">{copy.unavailable}</p> : null
+  if (sessionId) {
+    const tasks = feed.tasks.filter(
+      (task) =>
+        task.sessionId === sessionId &&
+        (task.reviewTargets ||
+          ['paused', 'interrupted', 'failed'].includes(task.state) ||
+          task.confirmation?.kind === 'clarification'),
+    )
+    return (
+      <>
+        {tasks.slice(0, 8).map((task) => (
+          <section className="office-task-item" key={task.id}>
+            <strong>{task.title}</strong> · {copy.status(task.state)}
+            {task.reason && <p>{copy.reason(task.reason)}</p>}
+            {task.reviewTargets?.map((path) => (
+              <p key={path}>
+                {onOpenFile ? (
+                  <button type="button" onClick={() => onOpenFile(path)}>
+                    {path}
+                  </button>
+                ) : (
+                  path
+                )}
+              </p>
+            ))}
+            {task.steps
+              .filter((step) => step.state === 'awaiting_reconciliation')
+              .map((step) => (
+                <code key={step.id}>{step.label}</code>
+              ))}
+            {task.confirmation?.kind === 'clarification' ? (
+              <TaskQuestionReply
+                question={task.confirmation.text}
+                lang={lang}
+                answer={async (answer) => {
+                  await api.answer({
+                    taskId: task.id,
+                    confirmationId: task.confirmation!.id,
+                    expectedRevision: task.revision,
+                    requestId: crypto.randomUUID(),
+                    answer,
+                  })
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                disabled={!!working}
+                onClick={() =>
+                  void run(
+                    task,
+                    task.reviewTargets ? 'reconcile' : task.state === 'failed' ? 'retry' : 'resume',
+                  )
+                }
+              >
+                {task.reviewTargets
+                  ? task.pendingControl === 'cancel'
+                    ? copy.acknowledge
+                    : copy.reconcile
+                  : task.state === 'failed'
+                    ? copy.retry
+                    : copy.resume}
+              </button>
+            )}
+          </section>
+        ))}
+        {error && <p role="alert">{error}</p>}
+      </>
+    )
+  }
   const actionable = feed.tasks.filter(
     (task) => !['completed', 'failed', 'cancelled'].includes(task.state),
   ).length
@@ -171,26 +244,6 @@ export function AssistantTaskShelf({
             <strong>{task.title}</strong> <small>{copy.status(task.state)}</small>
             {copy.reason(task.reason) && <p>{copy.reason(task.reason)}</p>}
             {task.confirmation && <p>{copy.status('waiting_user')}</p>}
-            {task.confirmation?.kind === 'clarification' && (
-              <TaskQuestionReply
-                key={task.confirmation.id}
-                question={task.confirmation.text}
-                lang={lang}
-                answer={async (answer) => {
-                  const result = await api.answer({
-                    taskId: task.id,
-                    confirmationId: task.confirmation!.id,
-                    requestId: crypto.randomUUID(),
-                    expectedRevision: task.revision,
-                    answer,
-                  })
-                  setFeed((current) => ({
-                    ...current,
-                    tasks: current.tasks.map((item) => (item.id === result.id ? result : item)),
-                  }))
-                }}
-              />
-            )}
             <div className="office-task-actions">
               <button
                 type="button"
@@ -215,56 +268,6 @@ export function AssistantTaskShelf({
                 >
                   {lang.startsWith('zh') ? '查看成果' : 'View results'}
                 </button>
-              )}
-              {['queued', 'running', 'waiting_user', 'waiting_resource', 'preparing'].includes(
-                task.state,
-              ) && (
-                <button type="button" disabled={!!working} onClick={() => void run(task, 'pause')}>
-                  {copy.pause}
-                </button>
-              )}
-              {['paused', 'interrupted', 'waiting_device'].includes(task.state) &&
-                task.reason !== 'outcome_unknown' && (
-                  <button
-                    type="button"
-                    disabled={!!working}
-                    onClick={() => void run(task, 'resume')}
-                  >
-                    {copy.resume}
-                  </button>
-                )}
-              {task.state === 'failed' && (
-                <button type="button" disabled={!!working} onClick={() => void run(task, 'retry')}>
-                  {copy.retry}
-                </button>
-              )}
-              {!['completed', 'failed', 'cancelled'].includes(task.state) && (
-                <button type="button" disabled={!!working} onClick={() => void run(task, 'cancel')}>
-                  {copy.cancel}
-                </button>
-              )}
-              {[
-                'outcome_unknown',
-                'task_context_changed',
-                'task_unsaved_context_unavailable',
-              ].includes(task.reason ?? '') && (
-                <>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={reviewed === task.id}
-                      onChange={(event) => setReviewed(event.target.checked ? task.id : '')}
-                    />{' '}
-                    {copy.reviewed}
-                  </label>
-                  <button
-                    type="button"
-                    disabled={!!working || reviewed !== task.id}
-                    onClick={() => void run(task, 'reconcile')}
-                  >
-                    {copy.reconcile}
-                  </button>
-                </>
               )}
               {feed.notices.some((item) => item.taskId === task.id) && (
                 <button
