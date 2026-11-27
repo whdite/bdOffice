@@ -12,6 +12,7 @@ import type { AgentRunFileChange } from '../../shared/workspace-agent-api'
 import type { TaskTargetVersion } from '../../shared/assistant-task-api'
 
 export interface DocumentObservation {
+  currentWordBytes?: () => Promise<Uint8Array>
   version: TaskTargetVersion
   liveSnapshot?: boolean
   snapshot?: DocumentSnapshot
@@ -90,6 +91,9 @@ export async function observeTaskDocument(input: {
   }
   return {
     version,
+    ...(type === 'docx' && live?.exportBytes
+      ? { currentWordBytes: () => live.exportBytes!() }
+      : {}),
     snapshot: snapshot ?? packageSnapshot,
     packageSnapshot,
     liveSnapshot: !!live,
@@ -138,6 +142,35 @@ export function nextRoundVersion(
     (!previous.editorIdentity || next.editorIdentity === previous.editorIdentity)
     ? next
     : undefined
+}
+
+/** Retain the round only across the same editor model or the exact staged bytes that were saved. */
+export function roundAfterWordSave(
+  previous: TaskTargetVersion,
+  current: DocumentObservation,
+): TaskTargetVersion | undefined {
+  const next = current.version
+  if (
+    previous.type !== 'docx' ||
+    next.type !== 'docx' ||
+    previous.path !== next.path ||
+    !next.complete ||
+    !next.exists ||
+    next.dirty
+  )
+    return
+  if (sameTaskTarget(previous, next)) return next
+  if (!previous.modelDigest || !next.diskDigest) return
+  if (current.liveSnapshot) {
+    if (
+      previous.editorIdentity &&
+      previous.editorIdentity === next.editorIdentity &&
+      previous.modelDigest === next.modelDigest &&
+      current.witness?.complete &&
+      current.witness.sha256 === next.diskDigest
+    )
+      return next
+  } else if (previous.modelDigest === next.diskDigest) return next
 }
 
 /** Match the host writer's promoted bytes to the file that was read back after a save. */

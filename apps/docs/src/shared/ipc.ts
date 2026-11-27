@@ -289,6 +289,7 @@ export interface AutoSaveDefault {
 export type CreateDocumentType = 'docx' | 'pdf' | 'md' | 'html'
 
 export interface CreateDocumentRequest {
+  instruction?: string
   type: CreateDocumentType
   /** file name stem (sanitized main-side) */
   title: string
@@ -297,6 +298,7 @@ export interface CreateDocumentRequest {
 }
 
 export interface CreateDocumentResult {
+  effect?: 'not_applied'
   ok: boolean
   sha256?: string
   /** The file acknowledged by the writer, including the first save of a generated Word tab. */
@@ -306,6 +308,7 @@ export interface CreateDocumentResult {
 
 /** AI-authored content queued for a docs tab spawned by create_document */
 export interface AiDocContent {
+  instruction?: string
   creationId?: string
   title: string
   html: string

@@ -98,6 +98,8 @@ export interface ToolExecution {
   /** true when the tool changed the underlying artifact (document / sheet / deck) */
   mutated?: boolean
   savedFile?: { path: string; sha256: string }
+  /** The Word writer observed no intervening user transaction while drafting. */
+  exclusiveWordDraft?: boolean
   wordPart?: WordPartEvidence
   /** Host-reported effect on the operation's target, including Word parts outside the body editor. */
   effect?: import('./tool-capability').ToolEffect

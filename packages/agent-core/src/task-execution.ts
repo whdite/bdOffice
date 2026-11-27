@@ -52,6 +52,8 @@ export interface AgentTaskExecution {
   /** Undefined when the task has no on-disk deliverable requirement. */
   checkSaved?(): Promise<boolean | undefined>
   pendingWordParts?(): Promise<string[]>
+  /** Host checks the actual deliverables against this brief, without another user decision. */
+  checkDelivery?(): Promise<string[]>
   finish(result: TaskExecutionEnd, checkpoint: AgentSessionSnapshot): Promise<void>
 }
 

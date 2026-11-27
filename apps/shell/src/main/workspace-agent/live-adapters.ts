@@ -476,6 +476,9 @@ class SlidesLiveAdapter implements LiveDocumentAdapter {
 }
 
 class DocsLiveAdapter implements LiveDocumentAdapter {
+  async exportBytes(): Promise<Uint8Array> {
+    return Buffer.from(await bridgeCall<string>(this.webContents, 'currentWordPackage'), 'base64')
+  }
   async cancelWord(id: string): Promise<void> {
     await bridgeCall(this.webContents, 'cancelWord', [id])
   }

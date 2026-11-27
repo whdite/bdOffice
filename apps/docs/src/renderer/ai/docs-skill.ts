@@ -51,6 +51,7 @@ export function createDocsSkill(
   getNotes?: () => AiNotesAccess | undefined,
   /** same as imageGenAvailable, for analyze_media (seeing pictures that are in the document) */
   mediaAnalysisAvailable?: () => boolean,
+  getInstruction?: () => string,
 ): AgentSkill {
   // Selection frozen per run: tools act on the range the prompt described,
   // not on wherever the user's live selection has wandered mid-run. The doc
@@ -114,6 +115,7 @@ export function createDocsSkill(
           getPageSetup?.(),
           getExtras?.(),
           getNotes?.(),
+          getInstruction?.(),
         ),
         call.name,
       ),

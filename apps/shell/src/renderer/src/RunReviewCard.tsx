@@ -303,7 +303,9 @@ export function RunReviewCard({
   const word = run.changes.length === 1 ? run.changes[0] : undefined
   const showSaveSummary = compact && !expanded && run.state === 'completed' && !!run.changes.length
   const allSaved = run.changes.every((change) => change.evidence?.saveState === 'saved')
-  const allVerified = run.changes.every((change) => change.evidence?.verification === 'passed')
+  const allVerified =
+    !run.delivery?.outstanding.length &&
+    run.changes.every((change) => change.evidence?.verification === 'passed')
   const canReviewWord = (change: AgentRunReview['changes'][number]) =>
     !run.historical && change.type === 'docx' && change.operation !== 'deleted' && !!change.evidence
   const changed = run.changes.filter(
@@ -338,7 +340,12 @@ export function RunReviewCard({
             {run.changes.map((change) => change.path.split(/[\\/]/).pop()).join(', ')}
           </span>
           {showSaveSummary && (
-            <small>{[allSaved ? copy.saved : copy.save_unknown, allVerified ? (zh ? '已核验' : 'Verified') : copy.unverified].join(' · ')}</small>
+            <small>
+              {[
+                allSaved ? copy.saved : copy.save_unknown,
+                allVerified ? (zh ? '已核验' : 'Verified') : copy.unverified,
+              ].join(' · ')}
+            </small>
           )}
         </div>
         <div className="run-evidence-actions">
@@ -370,6 +377,19 @@ export function RunReviewCard({
         </p>
       )}
       {run.evidenceStored === false && <p className="run-evidence-issue">{copy.notStored}</p>}
+      {showDetails && run.delivery && (
+        <div className="run-evidence-delivery">
+          {run.delivery.checked.map((line) => (
+            <div key={line}>{line}</div>
+          ))}
+          {run.delivery.outstanding.map((line) => (
+            <div key={line}>
+              {zh ? '待完成 · ' : 'Outstanding · '}
+              {line}
+            </div>
+          ))}
+        </div>
+      )}
       {showDetails && (
         <div className="workspace-chat-run-files">
           {run.changes.map((change) => (

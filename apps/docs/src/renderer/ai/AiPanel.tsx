@@ -587,6 +587,7 @@ export function AiPanel({
   const runSnapshotRef = useRef<PmNode | null>(null)
   /** last sent instruction, for one-click retry */
   const lastInstructionRef = useRef('')
+  const writerBriefRef = useRef('')
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full
       transcript persistence, and so persisting needn't do side effects inside a setState updater */
   const runToolsRef = useRef<
@@ -725,7 +726,10 @@ export function AiPanel({
     signal?: AbortSignal,
   ): Promise<DocWriteResult> => {
     const { system, user } = buildDocWriterRequest(
-      { ...spec, instruction: spec.instruction || lastInstructionRef.current },
+      {
+        ...spec,
+        instruction: spec.instruction || writerBriefRef.current || lastInstructionRef.current,
+      },
       aiLangDirective(),
     )
     const epoch = writerEpochRef.current
@@ -758,14 +762,14 @@ export function AiPanel({
         },
       })
     let outcome = await attempt()
-    if (outcome.status === 'empty' && !signal?.aborted) outcome = await attempt()
+    if (outcome.status !== 'complete' && !signal?.aborted) outcome = await attempt()
     closed = true
     if (chipTimer !== null) clearTimeout(chipTimer)
     if (outcome.status === 'complete') return { ok: true, html: outcome.text }
     if (outcome.status === 'empty') return { ok: false, error: outcome.error }
     if (epoch !== writerEpochRef.current) return { ok: false, error: 'the chat was reset' }
     // the draft stays in the document while the user decides
-    if (spec.instruction)
+    if (spec.instruction || !signal?.aborted)
       return {
         ok: false,
         error: 'The workspace draft stopped before completion. Retry with a shorter section.',
@@ -821,6 +825,7 @@ export function AiPanel({
         () => docExtrasRef.current,
         () => notesAccessRef.current,
         () => mediaAnalysisAvailable(settingsRef.current, false),
+        () => instruction || lastInstructionRef.current,
       ),
     [],
   )
@@ -1224,7 +1229,10 @@ export function AiPanel({
           setBusy(false)
           return
         }
-        return loop.run(await withSkillBodies(instruction, sentSkills), images)
+        const brief = await withSkillBodies(instruction, sentSkills)
+        if (generation !== runGenerationRef.current || pending.aborted) return
+        writerBriefRef.current = brief
+        return loop.run(brief, images)
       })
       .catch((error: unknown) => {
         if (!mountedRef.current || generation !== runGenerationRef.current) return

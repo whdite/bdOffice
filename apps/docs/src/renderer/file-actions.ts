@@ -87,6 +87,7 @@ import {
 } from './editor/ink'
 import { t, getLang } from './i18n/locale'
 import { isBlankDocument, parseHtmlFragment, replaceBlockRange } from './ai/protocol'
+import { wordLayout } from '@genoffice/agent-core'
 import { carryDocSeen } from './ai/tools'
 import { isDocDirty, resetCrossDocEditState } from './doc-dirty'
 import { pruneUnreferencedNumbering } from './numbering-actions'
@@ -1097,10 +1098,10 @@ function stripAiChanged(node: PmNode): PmNode {
  * here), so unparseable HTML falls back to plain-text paragraphs instead of
  * silently dropping the content.
  */
-export function aiDocContentNodes(html: string): PmNode[] {
+export function aiDocContentNodes(html: string, instruction = ''): PmNode[] {
   const numIds = { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID }
   try {
-    const nodes = parseHtmlFragment(html, numIds)
+    const nodes = parseHtmlFragment(html, numIds, wordLayout(instruction))
     if (nodes.length > 0) return nodes.map(stripAiChanged)
   } catch {
     /* fall through to the plain-text salvage */
@@ -1131,7 +1132,7 @@ export async function applyAiDocContent(
 ): Promise<boolean> {
   const { editor, doc } = ctx
   if (!editor || !doc) return false
-  const nodes = aiDocContentNodes(content.html)
+  const nodes = aiDocContentNodes(content.html, content.instruction)
   if (!nodes.length) return false
   replaceBlockRange(editor, 0, editor.state.doc.childCount - 1, nodes)
   resetEditorHistory(editor)

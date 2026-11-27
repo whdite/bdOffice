@@ -64,6 +64,7 @@ export interface FileTaskRequests {
     checkpoint: AgentSessionSnapshot
   }
   pendingWordParts: RunBound
+  checkDelivery: RunBound
   checkSaved: RunBound
   finish: RunBound & { result: TaskExecutionEnd; checkpoint: AgentSessionSnapshot }
 }
@@ -89,6 +90,7 @@ export interface FileTaskReplies {
   prepareTool: TaskToolPermit
   finishTool: void
   pendingWordParts: string[]
+  checkDelivery: string[]
   checkSaved: boolean | undefined
   finish: void
 }

@@ -15,6 +15,7 @@ import {
 } from '../../shared/assistant-task-api'
 
 import { updateWordChecks } from '@genoffice/agent-core'
+import type { DeliveryState } from './delivery'
 type Row = Record<string, unknown>
 export const TASK_EXECUTOR = 'local-office'
 const RESOURCE = 'local-office:mutation'
@@ -61,6 +62,7 @@ export interface TaskStepStart {
   targets: TaskTargetVersion[]
 }
 export interface TaskStepReceipt {
+  delivery?: DeliveryState
   wordSaveVerified?: boolean
   result: ToolExecution
   targets: TaskTargetVersion[]
@@ -68,6 +70,7 @@ export interface TaskStepReceipt {
   evidence?: Array<{ id: string; [key: string]: unknown }>
 }
 interface Plan {
+  delivery?: DeliveryState
   accountedAt?: number
   resumeRequested?: boolean
   retryRequestId?: string
@@ -839,6 +842,7 @@ export class AssistantTaskStore {
             json({
               ...receipt,
               evidence: undefined,
+              delivery: undefined, // The baseline is stored once in the plan, atomically with this receipt.
               result: {
                 output: bounded(receipt.result.output, 20_000),
                 summary: bounded(receipt.result.summary, 240),
@@ -870,6 +874,7 @@ export class AssistantTaskStore {
           targets.set(target.path, target)
         }
         plan.lastTargets = [...targets.values()]
+        if (receipt.delivery) plan.delivery = receipt.delivery
         if (receipt.result.wordPart) {
           const missing = new Map(Object.entries(plan.pendingWordParts ?? {}))
           updateWordChecks(missing, receipt.result.wordPart)

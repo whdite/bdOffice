@@ -1,4 +1,5 @@
 import { useManagedChatOpen } from '@genoffice/ui'
+import { bytesToBase64 } from '@genoffice/ai-provider'
 import { assertFullContent } from './phased-content'
 import { documentCommandError } from '../../../shell/src/shared/document-tool-contracts'
 import { scriptFontHtml } from './editor/script-fonts'
@@ -515,6 +516,7 @@ import {
 } from './doc-state'
 import {
   applyAiDocContent as applyAiDocContentImpl,
+  buildDocBytes,
   exportPdf as exportPdfImpl,
   exportHtml as exportHtmlImpl,
   exportMarkdown as exportMarkdownImpl,
@@ -2815,6 +2817,13 @@ export function App() {
       save: async () => ({ ok: await save(false, true) }),
       cancelWord: (id: string) => cancelWorkspaceWord(editor, id),
       snapshot: () => wordSnapshot(editor),
+      currentWordPackage: async () => {
+        const head = editor.state.doc
+        const bytes = await buildDocBytes(fileCtxRef.current)
+        if (!bytes || editor.state.doc !== head)
+          throw new Error('Word changed during layout verification.')
+        return bytesToBase64(bytes)
+      },
       taskDirty: () => dirtyRef.current,
       undo: () => {
         const changed = editor.commands.undo()

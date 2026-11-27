@@ -179,6 +179,7 @@ export interface AgentRunFileChange {
 
 /** Durable, UI-safe review record. Binary/model checkpoints stay in userData. */
 export interface AgentRunReview {
+  delivery?: { checked: string[]; outstanding: string[] }
   id: string
   taskId?: string
   state: AgentRunReviewState

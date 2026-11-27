@@ -5,6 +5,7 @@ import { TABLE_TRAILING_SKIP } from '../editor/extensions'
 import { TRACK_IGNORE } from '../editor/revisions'
 import { assertNoDocumentDraft, setDocumentDraft } from './draft-state'
 import { blockRangePositions, HTML_RULES, parseHtmlFragment, type NumIds } from './protocol'
+import { deliveryInstruction, type WordLayout } from '@genoffice/agent-core'
 
 /**
  * Long-form writing runs as its own tool-less request whose reply body IS the
@@ -50,6 +51,7 @@ const WRITER_SYSTEM = [
   '- Write the requested content in full: every section in the plan, real prose, no placeholders, no "[to be added]" notes.',
   '- Real data only: use the facts, figures, names and quotes from the reference material and the plan; never invent facts or numbers beyond them.',
   '- Follow the length the plan asks for; when it gives none, write what the content genuinely needs.',
+  '- Use the original brief for page limits, intended audience and protected facts. Use real headings, lists and tables appropriate to the genre. For a new document the title supports text-align and font-size in points; tables support percentage column widths.',
   '',
   '## Output',
   'Reply with the restricted HTML fragment only: it starts with the first block tag and ends with the last closing tag. No markdown code fences, no commentary before or after, no <html>/<body> wrapper.',
@@ -63,8 +65,13 @@ export function buildDocWriterRequest(
   const context = spec.context?.trim()
     ? `\n\n## Reference material (all names, figures and facts come from here)\n${spec.context.slice(0, CONTEXT_CAP)}`
     : ''
-  const instruction = spec.instruction.trim()
-    ? `\n\n## The user's request\n${spec.instruction.slice(0, 2000)}`
+  const original = deliveryInstruction(spec.instruction)
+  const presets =
+    original !== spec.instruction
+      ? spec.instruction.slice(0, spec.instruction.lastIndexOf('</skill>') + 8)
+      : ''
+  const instruction = original.trim()
+    ? `${presets ? '\n\n' + presets.slice(0, 24_000) : ''}\n\n## The user's request\n${original.slice(0, 8000)}`
     : ''
   return {
     system: WRITER_SYSTEM + langDirective,
@@ -121,6 +128,7 @@ export class DraftLanding {
     private readonly editor: Editor,
     private readonly numIds: NumIds,
     position: WritePosition,
+    private readonly layout?: WordLayout,
   ) {
     assertNoDocumentDraft(editor)
     setDocumentDraft(editor, true)
@@ -202,7 +210,7 @@ export class DraftLanding {
     this.pending = null
     let next: ProseMirrorNode[]
     try {
-      next = parseHtmlFragment(html, this.numIds).map((n) =>
+      next = parseHtmlFragment(html, this.numIds, this.layout).map((n) =>
         this.editor.schema.nodeFromJSON({ ...n, attrs: { ...n.attrs, aiChanged: false } }),
       )
     } catch {

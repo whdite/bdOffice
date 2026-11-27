@@ -131,6 +131,7 @@ export async function workspaceWordOperation(editor: Editor, command: Record<str
     changed: result.mutated || result.effect === 'applied' ? 1 : 0,
     effect: result.effect,
     wordPart: result.wordPart,
+    exclusiveWordDraft: result.exclusiveWordDraft,
     description: result.output,
   }
 }

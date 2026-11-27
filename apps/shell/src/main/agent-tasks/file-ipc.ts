@@ -352,6 +352,7 @@ export function registerFileTaskIpc(options: {
           summary: typeof value.summary === 'string' ? value.summary.slice(0, 500) : '',
           isError: value.isError === true,
           mutated: value.mutated === true,
+          ...(value.exclusiveWordDraft === true ? { exclusiveWordDraft: true } : {}),
           denied: value.denied === true,
           ...(value.externalEffect === 'applied' ||
           value.externalEffect === 'not_applied' ||
@@ -379,6 +380,8 @@ export function registerFileTaskIpc(options: {
       }
       case 'pendingWordParts':
         return execution.pendingWordParts?.() ?? []
+      case 'checkDelivery':
+        return execution.checkDelivery?.() ?? []
       case 'checkSaved':
         return execution.checkSaved?.()
       case 'finish': {

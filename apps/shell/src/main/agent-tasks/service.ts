@@ -26,6 +26,7 @@ import {
   observedEffect,
   verifiedWordSave,
   nextRoundVersion,
+  roundAfterWordSave,
   sameTaskTarget,
   taskFileChanges,
   mergeTaskFileChange,
@@ -33,6 +34,7 @@ import {
 } from './document-observation'
 import { portableResult } from '../workspace-agent/portable-results'
 import { taskFailureReason } from './failure-reason'
+import { DeliveryReview } from './delivery'
 
 export interface TaskExecutorBinding {
   /** Resolves targets through the original device/editor authority, never a renderer path override. */
@@ -90,6 +92,7 @@ export class AssistantTaskService {
         run(execution: AgentTaskExecution): Promise<void>
       }>
       saveReview(sessionId: string, review: AgentRunReview): Promise<void>
+      renderWordPages?(doc: DocumentObservation, signal?: AbortSignal): Promise<number>
       memoryContext?(request: AssistantTaskRequest): Promise<string>
       inspectReviewed?(
         request: AssistantTaskRequest,
@@ -420,6 +423,21 @@ export class AssistantTaskService {
     const authorizedHeads = new Map<string, TaskTargetVersion>()
     const fileChanges = new Map<string, AgentRunFileChange>()
     const startedAt = new Date().toISOString()
+    const delivery = new DeliveryReview(request.input.text, this.store.plan(id).delivery)
+    let deliveryIssues: string[] = []
+    let deliverySignal: AbortSignal | undefined
+    const checkDelivery = async () =>
+      (deliveryIssues = await delivery
+        .check(
+          binding.inspectTarget,
+          this.options.renderWordPages &&
+            ((doc) => this.options.renderWordPages!(doc, deliverySignal)),
+        )
+        .catch(() => [
+          request.input.text.match(/[\u3400-\u9fff]/u)
+            ? '需要重新读取本轮文件以核对交付要求。'
+            : 'Read the current deliverables again to verify the brief.',
+        ]))
     const checkSaved = async (): Promise<boolean | undefined> => {
       if (request.requiredResult !== 'saved_artifact') return undefined
       const receipts = this.store.saveTargets(id)
@@ -437,11 +455,13 @@ export class AssistantTaskService {
       taskId: id,
       supportsClarification: true,
       checkSaved,
+      checkDelivery,
       pendingWordParts: async () =>
         Object.keys(this.store.plan(id).pendingWordParts ?? {}).map((key) =>
           (JSON.parse(key) as string[]).filter(Boolean).join(' · '),
         ),
       start: async (input, signal) => {
+        deliverySignal = signal
         signal.throwIfAborted()
         await this.checkContext(request, id, binding)
         const memoryContext =
@@ -607,8 +627,10 @@ export class AssistantTaskService {
             isRoundWordEdit(started.call) &&
             sameTaskTarget(roundHead, previous) &&
             (result.effect !== 'not_applied' || (next && sameTaskTarget(previous, next))) &&
-            started.call.name !== 'write_document'
-              ? nextRoundVersion(previous, next)
+            (started.call.name !== 'write_document' || result.exclusiveWordDraft === true)
+              ? started.call.name === 'save_document' && after[0] && !result.isError
+                ? roundAfterWordSave(previous, after[0])
+                : nextRoundVersion(previous, next)
               : undefined
         }
         const changed = observed && observedEffect(started.values, after)
@@ -636,6 +658,16 @@ export class AssistantTaskService {
           change.tools = [started.call.name]
           mergeTaskFileChange(fileChanges, change)
         }
+        const source = !result.isError && delivery.wantsSource(started.call)
+        const track = source || (effect === 'applied' && observed)
+        const tracked =
+          track &&
+          (await delivery.record(
+            started.call,
+            started.values,
+            source ? await binding.observe(started.call).catch(() => []) : after,
+            source,
+          ))
         this.store.finishStep(
           lease,
           permit.stepId,
@@ -643,6 +675,7 @@ export class AssistantTaskService {
             result,
             effect,
             targets: targets(after),
+            ...(tracked ? { delivery: delivery.state } : {}),
             ...(after.some((item) => item.version.type === 'docx')
               ? {
                   wordSaveVerified: after.every(
@@ -712,6 +745,7 @@ export class AssistantTaskService {
             const resultMissing =
               result.state === 'completed' &&
               (!!unfulfilled ||
+                (await checkDelivery()).length > 0 ||
                 Object.keys(this.store.plan(id).pendingWordParts ?? {}).length > 0 ||
                 (request.requiredResult === 'saved_artifact' && !saved) ||
                 (request.requiredResult === 'editor_change' && !edited))
@@ -719,6 +753,14 @@ export class AssistantTaskService {
               review = {
                 ...review,
                 taskId: id,
+                ...(delivery.observations.length || deliveryIssues.length
+                  ? {
+                      delivery: {
+                        checked: delivery.observations.slice(0, 32),
+                        outstanding: deliveryIssues,
+                      },
+                    }
+                  : {}),
                 ...(resultMissing
                   ? { outcome: edited ? ('partial' as const) : ('failed' as const) }
                   : {}),

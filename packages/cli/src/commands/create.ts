@@ -21,7 +21,14 @@ import {
   type TableInput,
 } from '../formats/xlsx'
 import { exportViaApp } from '../formats/app-export'
-import { blankDocument, closeDocument, fillFromHtml, saveDocument } from '../formats/docx'
+import {
+  blankDocument,
+  openDocument,
+  closeDocument,
+  fillFromHtml,
+  saveDocument,
+} from '../formats/docx'
+import { wordLayout } from '@genoffice/agent-core'
 import { markdownToDocx } from '../formats/markdown'
 import { runWorkbookDsl } from '../formats/xlsx-dsl'
 import { columnLabel } from '@genoffice/xlsx-gateway/domain/cell-address'
@@ -41,6 +48,11 @@ export const createCommand: CommandDef = {
   usage:
     'create --type <pptx|xlsx|docx|pdf> (--ops <file|-> | --spec <file|dir|-> [--outline <file>] | --from <file>) --out <path> [--force]',
   options: [
+    {
+      name: 'word-brief',
+      value: 'file',
+      description: 'docx: original brief for title formatting and table column widths.',
+    },
     { name: 'type', value: 'type', description: `document type: ${TYPES.join(', ')}` },
     {
       name: 'ops',
@@ -389,16 +401,29 @@ async function createDocx(
   const source = resolveInput(from, ctx)
   const text = readFileSync(source, 'utf-8')
   const ext = extname(source).toLowerCase()
+  const briefFile = flagString(args, 'word-brief')
+  const layout = wordLayout(briefFile ? readFileSync(resolveInput(briefFile, ctx), 'utf8') : '')
   if (ext === '.md' || ext === '.markdown') {
-    return {
-      bytes: await markdownToDocx(text, { file: source, ctx }),
-      detail: { source: 'markdown' },
+    const bytes = await markdownToDocx(text, { file: source, ctx })
+    if (!briefFile) return { bytes, detail: { source: 'markdown' } }
+    const doc = await openDocument(bytes)
+    try {
+      const original = doc.editor.getJSON()
+      const blocks = original.content ?? []
+      const styled = doc.mods.protocol.formatGeneratedWord(blocks as never, layout)
+      if (styled.some((n, i) => n !== blocks[i])) {
+        doc.editor.commands.setContent({ ...original, content: styled } as never)
+        return { bytes: await saveDocument(doc), detail: { source: 'markdown' } }
+      }
+      return { bytes, detail: { source: 'markdown' } }
+    } finally {
+      closeDocument(doc)
     }
   }
   if (ext === '.html' || ext === '.htm') {
     const doc = await blankDocument()
     try {
-      const blocks = fillFromHtml(doc, text)
+      const blocks = fillFromHtml(doc, text, layout)
       return { bytes: await saveDocument(doc), detail: { source: 'html', blocks } }
     } finally {
       closeDocument(doc)

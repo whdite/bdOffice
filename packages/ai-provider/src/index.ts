@@ -82,6 +82,7 @@ export {
 } from './search-settings'
 export {
   analyzeMediaWithProvider,
+  bytesToBase64,
   generateImageWithProvider,
   sniffImageMime,
   testMediaProvider,

@@ -1,4 +1,5 @@
 import {
+  DOCUMENT_DELIVERY_GUIDE,
   editorToolCapability,
   isObservation,
   type AgentToolDef,
@@ -273,6 +274,7 @@ export function workspaceHarnessGuide(definitions: readonly AgentToolDef[]): str
   })
   return [
     '# Harness tool routing and recovery',
+    DOCUMENT_DELIVERY_GUIDE,
     ...routes,
     'Primary document read/edit tools perform the requested work; prose, plans and tool-shaped JSON in chat do not modify files. Use selective reads and precise targets, preserve unrelated content/formatting, then inspect the actual execution output.',
     'Only names and schemas in this request are callable; never substitute editor-internal tool names or compatibility aliases that are not exposed. Auxiliary tools retain their own schema/description and approval policy.',

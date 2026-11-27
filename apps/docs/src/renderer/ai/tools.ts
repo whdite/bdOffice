@@ -4,7 +4,8 @@ import { assertFullContent } from '../phased-content'
 import { hasDocumentDraft, DRAFT_IO_ERROR } from './draft-state'
 import type { Mark, Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ChartDisplay, CommentInfo, NewChart, NoteInfo } from '@genoffice/docx-engine'
-import type { ToolDisplay } from '@genoffice/agent-core'
+import type { ToolExecution as AgentToolExecution } from '@genoffice/agent-core'
+import { wordBriefForFile, wordLayout } from '@genoffice/agent-core'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
 import { t } from '../i18n/locale'
 import { MIND_MAP_LIMITS, MIND_MAP_TOOL, parseMindMapTree } from '@genoffice/agent-core/mind-map'
@@ -724,20 +725,9 @@ export interface FrozenSelection {
   doc: ProseMirrorNode
 }
 
-export interface ToolExecution {
-  /** result text fed back to the model */
-  output: string
-  isError?: boolean
-  savedFile?: { path: string; sha256: string }
-  externalEffect?: import('@genoffice/agent-core').ToolEffect
-  wordPart?: import('@genoffice/agent-core').WordPartEvidence
-  effect?: import('@genoffice/agent-core').ToolEffect
+export interface ToolExecution extends AgentToolExecution {
   /** true when the tool changed the document */
   mutated: boolean
-  /** short human-readable label for the chat activity chip */
-  summary: string
-  /** UI-only side channel (never enters the LLM context) */
-  display?: ToolDisplay
 }
 
 const fail = (
@@ -918,6 +908,7 @@ async function executeAsyncTool(
   editor: Editor,
   call: AgentToolCall,
   signal?: AbortSignal,
+  instruction = '',
 ): Promise<ToolExecution> {
   switch (call.name) {
     case 'web_search': {
@@ -1056,9 +1047,20 @@ async function executeAsyncTool(
           return fail(t('aiSumCreateDocument'), e instanceof Error ? e.message : String(e))
         }
       }
-      const r = await window.desktop.createDocument({ type, title, content })
+      const r = await window.desktop.createDocument({
+        type,
+        title,
+        content,
+        ...(type === 'docx' && instruction
+          ? { instruction: wordBriefForFile(instruction, title + '.docx') }
+          : {}),
+      })
       if (!r.ok)
-        return fail(t('aiSumCreateDocument'), r.error ?? 'creating the document failed', 'unknown')
+        return fail(
+          t('aiSumCreateDocument'),
+          r.error ?? 'creating the document failed',
+          r.effect ?? 'unknown',
+        )
       const name = `${title}.${type}`
       return {
         output: r.path
@@ -1262,6 +1264,7 @@ export function executeTool(
   pageSetup?: AiPageSetupAccess,
   extras?: AiDocExtras,
   notes?: AiNotesAccess,
+  instruction = '',
 ): ToolExecution | Promise<ToolExecution> {
   try {
     assertFullContent()
@@ -1290,10 +1293,10 @@ export function executeTool(
     call.name === 'analyze_media' ||
     call.name === 'create_document'
   ) {
-    return executeAsyncTool(editor, call, signal)
+    return executeAsyncTool(editor, call, signal, instruction)
   }
   if (call.name === 'write_document')
-    return writeDocument(editor, call, numIds, track, signal, writer)
+    return writeDocument(editor, call, numIds, track, signal, writer, instruction)
   if (call.name === 'set_watermark' && typeof call.input.image === 'string')
     return setPictureWatermark(call, signal, extras)
   return settle(
@@ -1308,6 +1311,7 @@ async function writeDocument(
   track: AiTrack | undefined,
   signal: AbortSignal | undefined,
   writer: AiDocWriter | undefined,
+  instruction: string,
 ): Promise<ToolExecution> {
   const summary = t('aiSumWriteDocument')
   const plan = String(call.input.plan ?? '').trim()
@@ -1329,7 +1333,8 @@ async function writeDocument(
     )
   }
   const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v))
-  const draft = new DraftLanding(editor, numIds, position)
+  const layout = position.kind === 'whole' ? wordLayout(instruction || plan) : undefined
+  const draft = new DraftLanding(editor, numIds, position, layout)
   let result: DocWriteResult
   let rendered: string | null
   try {
@@ -1355,17 +1360,17 @@ async function writeDocument(
   if (!result.ok || !result.html) {
     return fail(
       t('aiSumWriteDocumentFailed'),
-      `The writer produced nothing (${result.error ?? 'no output'}); the document is unchanged. Tell the user briefly and offer to try again.`,
+      `The draft was not applied (${result.error ?? 'no output'}). Retry in smaller sections within this request.`,
     )
   }
   let nodes: ReturnType<typeof parseHtmlFragment>
   try {
-    nodes = parseHtmlFragment(result.html, numIds)
+    nodes = parseHtmlFragment(result.html, numIds, layout)
   } catch (e) {
     // a kept partial can end mid-formula: land what the user saw rendered instead
     if (!result.truncated || !rendered)
       return fail(t('aiSumWriteDocumentFailed'), e instanceof Error ? e.message : String(e))
-    nodes = parseHtmlFragment(rendered, numIds)
+    nodes = parseHtmlFragment(rendered, numIds, layout)
   }
   nodes = resolveImageRefs(editor, nodes).nodes
   if (nodes.length === 0)
@@ -1388,9 +1393,10 @@ async function writeDocument(
     ? ' The stream ended early, so the content is INCOMPLETE (the user chose to keep it): the tail is missing. Say so and offer to finish the missing sections with write_document (afterBlockIndex at the end) or insert_content.'
     : ''
   return {
-    output: `Content written by the system (${nodes.length} block(s), ${result.html.length} chars). Block indexes have changed; use get_document_context if needed.${note}\nReply with one or two sentences describing what was written; do not paste the content.`,
+    output: `Content written by the system (${nodes.length} block(s), ${result.html.length} chars). Block indexes have changed. Inspect the affected document, repair remaining discrepancies and save when requested before reporting the outcome.${note}`,
     mutated: true,
     summary: result.truncated ? t('aiSumWriteDocumentPartial') : summary,
+    exclusiveWordDraft: !draft.externalEdits && !result.truncated,
   }
 }
 

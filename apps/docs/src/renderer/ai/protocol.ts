@@ -10,6 +10,9 @@ import {
   type TableModel,
 } from '@genoffice/docx-engine'
 import { pmTableToModel, tableModelToPmNode, type PmMark, type PmNode } from '../editor/convert'
+import { formatGeneratedWord } from './generated-layout'
+import type { WordLayout } from '@genoffice/agent-core'
+export { formatGeneratedWord } from './generated-layout'
 import { wordTableCell, wordTableModel } from '../editor/new-table'
 import { equationBlockJson, inlineEquationNodeJson } from '../editor/equation'
 import { inheritFrom, inheritTableFormatting, sameBlockRole } from './inherit-formatting'
@@ -1271,7 +1274,7 @@ export function countInlineImages(editor: Editor, start: number, end: number): n
   return n
 }
 
-export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
+export function parseHtmlFragment(raw: string, numIds: NumIds, generated?: WordLayout): PmNode[] {
   let text = raw.trim()
   const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
   if (fence) text = fence[1].trim()
@@ -1279,12 +1282,13 @@ export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
 
   // plain text response (no tags): one paragraph per blank-line-separated chunk
   if (!/<[a-z][\s\S]*>/i.test(text)) {
-    return text
+    const blocks = text
       .split(/\n{2,}/)
       .map((para) =>
         blockNode('docParagraph', {}, [{ type: 'text', text: para.replace(/\s+/g, ' ').trim() }]),
       )
       .filter((n) => n.content?.[0]?.text)
+    return generated ? formatGeneratedWord(blocks, generated) : blocks
   }
 
   const parsed = new DOMParser().parseFromString(text, 'text/html')
@@ -1333,7 +1337,7 @@ export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
       if (t) out.push(blockNode('docParagraph', {}, [{ type: 'text', text: t }]))
     }
   })
-  return out
+  return generated ? formatGeneratedWord(out, generated, parsed) : out
 }
 
 const BLOCK_TAG = /<\/?(h[1-6]|p|div|ul|ol|li|table|thead|tbody|tr|th|td|pre|blockquote)\b/gi

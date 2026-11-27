@@ -16,6 +16,15 @@ export type {
 } from './types'
 export { composeSkills } from './skill'
 export {
+  deliveryInstruction,
+  DOCUMENT_DELIVERY_GUIDE,
+  wordBriefForFile,
+  wordPageLimit,
+  pageMismatch,
+  wordLayout,
+  type WordLayout,
+} from './document-delivery'
+export {
   editorToolCapability,
   isRoundWordEdit,
   isObservation,

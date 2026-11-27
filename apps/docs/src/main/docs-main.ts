@@ -6226,6 +6226,7 @@ export function registerDocsIpc(): void {
 /** hooks injected by the shell in tab mode; standalone mode leaves these unset
  * and falls back to real multi-BrowserWindow behavior. */
 interface DocsShellHooks {
+  checkNewWord?(content: string, instruction: string): Promise<string | undefined>
   openTab(openPath?: string, options?: { newBlank?: boolean }): void
   /** open a blank docs tab that consumes the queued AI content on boot (create_document) */
   openAiDocTab?(content: AiDocContent): void
@@ -6308,6 +6309,12 @@ export async function createAiDocument(
   if (!content.trim()) return { ok: false, error: 'content must not be empty' }
   try {
     if (type === 'docx') {
+      if (typeof request.instruction === 'string' && shellHooks?.checkNewWord) {
+        const issue = await shellHooks
+          .checkNewWord(content, request.instruction)
+          .catch(() => undefined)
+        if (issue) return { ok: false, error: issue, effect: 'not_applied' }
+      }
       const creationId = randomUUID()
       return await new Promise<CreateDocumentResult>((resolve) => {
         const finish = (result: CreateDocumentResult) => {
@@ -6322,7 +6329,14 @@ export async function createAiDocument(
         )
         generatedWordSaves.set(creationId, { title, finish })
         try {
-          const payload: AiDocContent = { title, html: content, creationId }
+          const payload: AiDocContent = {
+            title,
+            html: content,
+            creationId,
+            ...(typeof request.instruction === 'string'
+              ? { instruction: request.instruction.slice(0, 16_000) }
+              : {}),
+          }
           if (shellHooks?.openAiDocTab) shellHooks.openAiDocTab(payload)
           else {
             const win = createDocsWindow(undefined)

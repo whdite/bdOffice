@@ -22,6 +22,7 @@ import type {
 import {
   observeTaskDocument,
   nextRoundVersion,
+  roundAfterWordSave,
   sameTaskTarget,
   type DocumentObservation,
 } from '../agent-tasks/document-observation'
@@ -83,6 +84,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   AgentLoop,
+  wordBriefForFile,
   sanitizeAgentPayload,
   type AgentImage,
   type AgentSkill,
@@ -1513,6 +1515,7 @@ interface RunRestoreHead {
 class RoundVersionConflict extends Error {}
 
 export interface MutationResult {
+  exclusiveWordDraft?: boolean
   ok: boolean
   changed: number
   description: string
@@ -4144,6 +4147,24 @@ function toolDef(
   }
 }
 
+function sourceFactSchema(location: 'cell' | 'blockId' | 'page') {
+  return {
+    type: 'array',
+    description:
+      'Bind source facts to their intended deliverables during this read. Use the actual source location, identifying label (including period if needed) and output filenames.',
+    items: {
+      type: 'object',
+      required: location === 'cell' ? ['cell'] : [location, 'label', 'value'],
+      properties: {
+        [location]: location === 'page' ? { type: 'integer', minimum: 1 } : { type: 'string' },
+        label: { type: 'string' },
+        ...(location === 'cell' ? {} : { value: { type: 'string' } }),
+        outputs: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  }
+}
+
 export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
   toolDef(
     'office.export',
@@ -4312,6 +4333,7 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
     query: { type: 'string' },
   }),
   toolDef('docx.read', 'Read selected DOCX blocks.', {
+    deliveryFacts: sourceFactSchema('blockId'),
     path: { type: 'string' },
     blockIds: { type: 'array', items: { type: 'string' } },
     blockStart: { type: 'integer', minimum: 0 },
@@ -4472,6 +4494,7 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
       range: { type: 'string' },
       query: { type: 'string' },
       includeFormatting: { type: 'boolean' },
+      deliveryFacts: sourceFactSchema('cell'),
       maxChars: { type: 'integer' },
     },
   ),
@@ -4591,6 +4614,7 @@ export const WORKSPACE_TOOL_DEFS: AgentToolDef[] = [
     maxChars: { type: 'integer' },
   }),
   toolDef('pdf.read', 'Read text from a PDF or search its extracted pages.', {
+    deliveryFacts: sourceFactSchema('page'),
     path: { type: 'string' },
     query: { type: 'string' },
     pages: { type: 'array', items: { type: 'integer', minimum: 1 } },
@@ -6115,11 +6139,19 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
         const next =
           (!execution.isError || execution.effect === 'not_applied') &&
           roundDocumentCall(call) &&
-          call.input.name !== 'write_document' &&
+          (call.input.name !== 'write_document' || execution.exclusiveWordDraft === true) &&
           !call.name.endsWith('.save')
             ? await this.documentRoundHead(runtime, requestedPath)
             : undefined
-        const updated = nextRoundVersion(previous, next)
+        let updated = nextRoundVersion(previous, next)
+        if (previous.type === 'docx' && !execution.isError && call.name.endsWith('.save')) {
+          const current = await this.observeAssistantTarget(
+            runtime.record.id,
+            requestedPath,
+            active.id,
+          ).catch(() => undefined)
+          if (current) updated = roundAfterWordSave(previous, current)
+        }
         if (updated) active.approvedDocuments.set(key, updated)
         else active.approvedDocuments.delete(key)
       }
@@ -9105,6 +9137,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
                   content,
                   source === 'html' ? 'html' : 'md',
                   signal,
+                  runtime.pendingInput ? wordBriefForFile(runtime.pendingInput, target) : undefined,
                 )
               : await createDocxBytes(input)
           await writeNewFile(target, bytes)
@@ -9135,6 +9168,7 @@ export class WorkspaceAgentRuntime implements WorkspaceAgentRuntimePort {
             isError: !result.ok,
             mutated: result.changed > 0,
             ...(result.wordPart ? { wordPart: { ...result.wordPart, path: session.path } } : {}),
+            ...(result.exclusiveWordDraft ? { exclusiveWordDraft: true } : {}),
             effect:
               result.effect ??
               (result.ok ? (result.changed ? 'applied' : 'not_applied') : 'unknown'),

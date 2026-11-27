@@ -660,6 +660,8 @@ export class AgentLoop<TSnapshot = unknown> {
   private verifyRetryUsed = false
   private saveRetryUsed = false
   private partRetryUsed = false
+  private deliveryRetries = 0
+  private lastDeliveryIssue = ''
   private completionError: string | undefined
   private editorVerifyRetries = 0
   private runInstruction = ''
@@ -956,6 +958,8 @@ export class AgentLoop<TSnapshot = unknown> {
     this.verifyRetryUsed = false
     this.saveRetryUsed = false
     this.partRetryUsed = false
+    this.deliveryRetries = 0
+    this.lastDeliveryIssue = ''
     this.completionError = undefined
     this.editorVerifyRetries = 0
     this.runInstruction = instruction
@@ -1957,6 +1961,48 @@ export class AgentLoop<TSnapshot = unknown> {
       }
     }
     if (
+      !toolCalls.length &&
+      !this.cancelled &&
+      !this.completionError &&
+      !saveUnconfirmed &&
+      this.activeTask?.checkDelivery &&
+      !this.executedCalls.some((call) => call.denied || call.effect === 'unknown')
+    ) {
+      const generation = this.generation
+      const issues = await this.activeTask.checkDelivery()
+      if (this.generation !== generation || this.cancelled) return
+      if (issues.length) {
+        const detail = issues.join('\n')
+        const progress =
+          detail +
+          '\n' +
+          this.executedCalls.filter(
+            (call) => call.ok && (call.mutated || call.effect === 'applied'),
+          ).length
+        if (
+          !this.finalizing &&
+          this.deliveryRetries < 3 &&
+          progress !== this.lastDeliveryIssue &&
+          this.turns < (this.options.maxTurns ?? DEFAULT_MAX_TURNS)
+        ) {
+          this.deliveryRetries++
+          this.lastDeliveryIssue = progress
+          this.appendResponseCheck(
+            'The actual deliverables still differ from the original brief. Repair only these discrepancies using the existing authorization and targets, save if requested, and recheck. Keep verified work. Do not request routine user confirmation or create duplicate files.\n' +
+              detail,
+          )
+          this.startTurn()
+          return
+        }
+        this.completionError = 'result_not_verified'
+        this.turnText =
+          (/[\u3400-\u9fff]/u.test(this.runInstruction)
+            ? '已保留本轮成果，以下要求仍待完成。\n'
+            : 'The current work was retained. Outstanding requirements:\n') + detail
+        events?.onText?.(this.turnText)
+      }
+    }
+    if (
       toolCalls.length === 0 &&
       !this.cancelled &&
       !this.finalizing &&
@@ -2012,6 +2058,7 @@ export class AgentLoop<TSnapshot = unknown> {
         this.finalizing &&
         this.finalizing !== 'approval-denied' &&
         !saveUnconfirmed &&
+        !this.completionError &&
         !this.cancelled &&
         this.options.editorHarness
       ) {

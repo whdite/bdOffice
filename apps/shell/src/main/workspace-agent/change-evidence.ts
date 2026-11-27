@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { parseDocx } from '@genoffice/docx-engine'
+import { redactNode } from '../../../../docs/src/renderer/ai/redact-view'
 import {
   openPptx,
   elementCNvPrId,
@@ -20,8 +21,11 @@ interface Unit {
   text: string
   digest: string
   properties: string
+  headingLevel?: number
+  cellValue?: string
 }
 export interface EvidenceObservation {
+  wordLayout?: { title?: { align: string; sizes: number[] }; tables: number[][] }
   version: string
   units: Unit[]
   incomplete: boolean
@@ -127,16 +131,45 @@ function column(index: number): string {
 }
 
 /** Extract actual model/package content; no tool input or assistant summary is used. */
+/** Corrective messages enter the model context, so use the same withheld-span projection as Word. */
+export async function observeDeliveryDocument(
+  snapshot: DocumentSnapshot,
+  live: boolean,
+  layout = false,
+): Promise<EvidenceObservation> {
+  if (live && snapshot.type === 'docx') {
+    const bytes = Buffer.from(snapshot.bytesBase64, 'base64')
+    if (bytes.length <= MAX_PARSE_BYTES && bytes.includes('"redaction"')) {
+      const projected = redactNode(JSON.parse(bytes.toString('utf8')))
+      snapshot = {
+        ...snapshot,
+        bytesBase64: Buffer.from(JSON.stringify(projected)).toString('base64'),
+      }
+    }
+  }
+  return observeDocument(snapshot, live, layout)
+}
+
 export async function observeDocument(
   snapshot: DocumentSnapshot,
   live: boolean,
+  inspectLayout = false,
 ): Promise<EvidenceObservation> {
   const bytes = Buffer.from(snapshot.bytesBase64, 'base64')
   if (bytes.length > MAX_PARSE_BYTES)
     return { version: hash(bytes), units: [], incomplete: true, content: hash('unavailable') }
   const units: Unit[] = []
+  const layout: EvidenceObservation['wordLayout'] =
+    inspectLayout && snapshot.type === 'docx' ? { tables: [] } : undefined
   let incomplete = false
-  const add = (key: string, location: ChangeLocation, value: string, properties: unknown = {}) => {
+  const add = (
+    key: string,
+    location: ChangeLocation,
+    value: string,
+    properties: unknown = {},
+    headingLevel?: number,
+    cellValue?: string,
+  ) => {
     if (units.length >= MAX_UNITS) {
       incomplete = true
       return
@@ -148,6 +181,8 @@ export async function observeDocument(
       text: value,
       properties: props,
       digest: hash(stable([value, properties])),
+      ...(headingLevel ? { headingLevel } : {}),
+      ...(cellValue !== undefined ? { cellValue } : {}),
     })
   }
   const json: unknown = live ? JSON.parse(bytes.toString('utf8')) : undefined
@@ -165,7 +200,37 @@ export async function observeDocument(
           { kind: 'block', blockId, index: index + 1 },
           nodeText(node),
           docxContentModel(node),
+          record(node).type === 'docHeading' ? Number(attrs.level) : undefined,
         )
+        if (layout && record(node).type === 'docHeading' && !layout.title) {
+          const runs = array(record(node).content)
+            .map(record)
+            .filter((r) => r.type === 'text' && text(r.text).trim())
+          layout.title = {
+            align: text(attrs.align || 'left'),
+            sizes: runs.map(
+              (r) =>
+                Number(
+                  record(
+                    array(r.marks)
+                      .map(record)
+                      .find((m) => m.type === 'docTextStyle')?.attrs,
+                  ).sizeHalfPoints,
+                ) / 2 || 0,
+            ),
+          }
+        }
+        if (layout && record(node).type === 'docTable') {
+          const row = record(array(record(node).content)[0])
+          const widths = array(row.content).flatMap((c) =>
+            array(record(record(c).attrs).colwidth).map(Number),
+          )
+          layout.tables.push(
+            widths.length === array(row.content).length && widths.every((w) => w > 0)
+              ? widths
+              : array(attrs.colWidthsPct).map(Number),
+          )
+        }
       })
     } else {
       const document = await parseDocx(bytes)
@@ -178,12 +243,29 @@ export async function observeDocument(
                 .map((row) => row.map((cell) => cell.paras.join('\n')).join(' | '))
                 .join('\n')
             : (block.runs ?? []).map((run) => run.text).join('')
-        add(blockId, { kind: 'block', blockId, index: index + 1 }, value, {
-          type: block.type,
-          level: block.level,
-          runs: block.runs,
-          table: block.table,
-        })
+        add(
+          blockId,
+          { kind: 'block', blockId, index: index + 1 },
+          value,
+          {
+            type: block.type,
+            level: block.level,
+            runs: block.runs,
+            table: block.table,
+          },
+          block.type === 'heading' ? block.level : undefined,
+        )
+        if (layout && block.type === 'heading' && !layout.title) {
+          const style = block.styleId ? document.styles.get(block.styleId)?.display : undefined
+          layout.title = {
+            align: block.format?.align ?? style?.align ?? 'left',
+            sizes: (block.runs ?? [])
+              .filter((r) => r.text.trim())
+              .map((r) => (r.sizeHalfPoints ?? style?.sizeHalfPoints ?? 0) / 2),
+          }
+        }
+        if (layout && block.type === 'table')
+          layout.tables.push(block.table?.colWidthsTwips ?? block.table?.colWidthsPct ?? [])
       })
     }
   } else if (snapshot.type === 'xlsx' || snapshot.type === 'xlsm') {
@@ -217,6 +299,8 @@ export async function observeDocument(
               { kind: 'cell', sheet: name, sheetId, range },
               value,
               typeof cell.s === 'string' ? styles[cell.s] : cell.s,
+              undefined,
+              cell.v == null ? undefined : text(cell.v),
             )
           }
         }
@@ -236,6 +320,10 @@ export async function observeDocument(
             { kind: 'cell', sheet: sheet.name, sheetId: sheet.id, range },
             cell.formula ? '=' + cell.formula.replace(/^=/, '') : text(cell.rawValue ?? cell.value),
             sheet.styles?.[range],
+            undefined,
+            cell.rawValue == null && cell.value == null
+              ? undefined
+              : text(cell.rawValue ?? cell.value),
           )
       }
     }
@@ -341,6 +429,7 @@ export async function observeDocument(
   return {
     version: evidenceSnapshotDigest(snapshot, live),
     units,
+    ...(layout ? { wordLayout: layout } : {}),
     incomplete,
     content: hash(
       stable(

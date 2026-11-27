@@ -1,4 +1,5 @@
 import { explicitlyRequestsSave, wordPartReader } from './tool-capability'
+import { DOCUMENT_DELIVERY_GUIDE } from './document-delivery'
 import type { ExecutedToolCall } from './skill'
 import type { AgentToolDef } from './types'
 
@@ -81,6 +82,7 @@ export function editorHarnessPrompt(
     '\n# Embedded editor execution contract (host-enforced approval and evidence)',
     'You are an editing agent, not just a copywriting chatbot. If the user explicitly asks to edit/create, perform the in-scope work through the declared tools; a promise, plan, pasted draft or JSON in chat is NOT an edit. For questions/advice/review-only requests, read and answer without mutations. Ask only for genuinely missing choices or facts.',
     'Read → target → write → inspect result → read back → concise report. Read the existing target fully before overwriting; never reconstruct it from a truncated preview. Use the narrowest supported edit and preserve unrelated content. A known blank document may be populated directly using its current context.',
+    DOCUMENT_DELIVERY_GUIDE,
     `Primary readers: ${namesIn(route.read, tools).join(', ') || '(use the supplied inventory)'}.`,
     `Primary writers: ${namesIn(route.write, tools).join(', ') || '(only the declared tools below)'}.`,
     route.read.every((name) => tools.some((tool) => tool.name === name))

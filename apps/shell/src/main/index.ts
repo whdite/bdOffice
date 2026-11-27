@@ -33,7 +33,7 @@ import {
   registerFileTaskIpc,
 } from './agent-tasks/file-ipc'
 import { observeTaskDocument } from './agent-tasks/document-observation'
-import type { EditorHarnessKind } from '@genoffice/agent-core'
+import { wordPageLimit, pageMismatch, type EditorHarnessKind } from '@genoffice/agent-core'
 import { taskHash, taskId } from './agent-tasks/assistant-store'
 import {
   ASSISTANT_TASK_CHANNELS,
@@ -3937,6 +3937,18 @@ function getAssistantTaskService(): AssistantTaskService {
   if (assistantTaskService) return assistantTaskService
   const store = getTaskStore().assistant
   return (assistantTaskService = new AssistantTaskService(store, {
+    renderWordPages: async (doc, signal) => {
+      const bytes =
+        doc.liveSnapshot && doc.version.dirty
+          ? await doc.currentWordBytes?.()
+          : Buffer.from(
+              (doc.snapshot && !doc.liveSnapshot ? doc.snapshot : doc.packageSnapshot)
+                ?.bytesBase64 ?? '',
+              'base64',
+            )
+      if (!bytes?.length) throw new Error('current_word_layout_unavailable')
+      return new WordFileExecutor(bundledCliRunner()).renderPages(bytes, signal)
+    },
     isActiveSession: (id) => {
       try {
         return (
@@ -5138,6 +5150,17 @@ function createShellWindow(): void {
   // A detached docs/sheets window can outlive the shell window; its hooks must
   // then reach the live tab manager (recreating the shell), never this closure's.
   setDocsShellHooks({
+    checkNewWord: async (content, instruction) => {
+      const limit = wordPageLimit(instruction)
+      if (!limit) return
+      const worker = new WordFileExecutor(bundledCliRunner())
+      const bytes = await worker.create(content, 'html', undefined, instruction)
+      return pageMismatch(
+        limit,
+        await worker.renderPages(bytes),
+        /[\u3400-\u9fff]/u.test(instruction),
+      )
+    },
     openTab: (openPath, options) => ensureTabManager().openDocsTab(openPath, options),
     openAiDocTab: (content) =>
       ensureTabManager().openDocsTab(undefined, { newBlank: true, aiContent: content }),

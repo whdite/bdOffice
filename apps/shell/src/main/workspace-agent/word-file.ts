@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolExecution } from '@genoffice/agent-core'
+import { PDFDocument } from 'pdf-lib'
 import { cliErrorMessage, type CliRunner } from '../mcp/cli-runner'
 
 /** The CLI owns its DOM in a child process. Workspace sessions keep the authoritative staged bytes. */
@@ -17,18 +18,44 @@ export class WordFileExecutor {
     }
   }
 
-  create(content: string, format: 'md' | 'html', signal?: AbortSignal): Promise<Uint8Array> {
+  create(
+    content: string,
+    format: 'md' | 'html',
+    signal?: AbortSignal,
+    instruction?: string,
+  ): Promise<Uint8Array> {
     return this.temporary(async (dir) => {
       const src = join(dir, 'source.' + format),
         out = join(dir, 'created.docx')
       await writeFile(src, content)
-      const run = await this.runner.run(['create', '--type', 'docx', '--from', src, '--out', out], {
+      const args = ['create', '--type', 'docx', '--from', src, '--out', out]
+      if (instruction) {
+        const brief = join(dir, 'brief.txt')
+        await writeFile(brief, instruction)
+        args.push('--word-brief', brief)
+      }
+      const run = await this.runner.run(args, {
         cwd: dir,
         signal,
         env: { GENOFFICE_ALLOWED_ROOTS: dir },
       })
       if (!run.ok) throw new Error(cliErrorMessage(run))
       return readFile(out)
+    })
+  }
+
+  renderPages(bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
+    return this.temporary(async (dir) => {
+      const file = join(dir, 'render.docx'),
+        out = join(dir, 'render.pdf')
+      await writeFile(file, bytes)
+      const run = await this.runner.run(['convert', file, '--to', 'pdf', '--out', out], {
+        cwd: dir,
+        signal,
+        env: { GENOFFICE_ALLOWED_ROOTS: dir },
+      })
+      if (!run.ok) throw new Error(cliErrorMessage(run))
+      return (await PDFDocument.load(await readFile(out))).getPageCount()
     })
   }
 

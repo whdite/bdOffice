@@ -120,6 +120,7 @@ export function createChatPersistence(
         finishTool: (permit, result, checkpoint) =>
           call('finishTool', { ...args(), permit, result, checkpoint }),
         pendingWordParts: () => call('pendingWordParts', args()),
+        checkDelivery: () => call('checkDelivery', args()),
         checkSaved: () => call('checkSaved', args()),
         finish: (result, checkpoint) => call('finish', { ...args(), result, checkpoint }),
       }
